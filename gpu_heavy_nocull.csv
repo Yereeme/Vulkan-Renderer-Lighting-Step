@@ -1,0 +1,23 @@
+Selected physical device 'NVIDIA GeForce RTX 4080 SUPER'.
+Memory types:
+ [0] heap 1, flags: VkMemoryPropertyFlags(0)
+ [1] heap 0, flags: VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+ [2] heap 1, flags: VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+ [3] heap 1, flags: VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT|VK_MEMORY_PROPERTY_HOST_CACHED_BIT
+ [4] heap 0, flags: VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT|VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+Memory heaps:
+ [0] heap 16826499072 bytes, flags: VK_MEMORY_HEAP_DEVICE_LOCAL_BIT
+ [1] heap 17017167872 bytes, flags: VkMemoryHeapFlags(0)
+Swapchain is now 3 images of size 1024x768.
+[A1-load] scene: scenes\gpu_heavy.s72
+  nodes:      2
+  meshes:     1
+  cameras:    1
+  materials:  0
+  textures:   0
+  datafiles:  1
+[A1-show] scene cameras found: 1
+[A1-load] mesh 'Plane' packed verts=61206
+[A1-load] mesh->range entries = 1
+[A1-load] S72 packed total verts=61206 bytes=1958592
+[A1-show] mapped materials -> textures: 0
