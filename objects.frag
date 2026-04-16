@@ -46,7 +46,9 @@ layout(set = 4, binding = 0) readonly buffer Lights {
 
 // Shadow map generated from the light's point of view.
 // We sample it in the lighting pass to decide whether this fragment is occluded.
-layout(set = 5, binding = 0) uniform sampler2D SHADOW_MAP;
+//layout(set = 5, binding = 0) uniform sampler2D SHADOW_MAP;
+const int MAX_SHADOW_SPOT_LIGHTS = 16;
+layout(set = 5, binding = 0) uniform sampler2D SHADOW_MAPS[MAX_SHADOW_SPOT_LIGHTS];
 
 layout(push_constant) uniform Push {
     mat4 LIGHT_CLIP_FROM_WORLD;
@@ -74,13 +76,47 @@ const float PI = 3.14159265359;
 //
 // Interview phrasing:
 // "Shadow mapping is a depth comparison in light space."
-float sample_shadow(vec3 worldPos, vec3 N, vec3 lightDir)
+mat4 make_spot_light_matrix(GPULight light) {
+    vec3 F = normalize(light.direction.xyz);
+    vec3 up = vec3(0.0, 1.0, 0.0);
+    if (abs(dot(F, up)) > 0.99) up = vec3(1.0, 0.0, 0.0);
+
+    vec3 R = normalize(cross(up, F));
+    vec3 U = cross(F, R);
+    vec3 P = light.position.xyz;
+
+    mat4 view = mat4(
+        R.x, U.x, -F.x, 0.0,
+        R.y, U.y, -F.y, 0.0,
+        R.z, U.z, -F.z, 0.0,
+        -dot(R, P), -dot(U, P), dot(F, P), 1.0
+    );
+
+    float near_ = 0.1;
+    float far_ = 100.0;
+    float e = 1.0 / tan(light.params.w * 0.5);
+    float A = -0.5 - 0.5 * (far_ + near_) / (far_ - near_);
+    float B = -(far_ * near_) / (far_ - near_);
+
+    mat4 proj = mat4(
+        e,   0.0, 0.0,  0.0,
+        0.0, -e,  0.0,  0.0,
+        0.0, 0.0, A,   -1.0,
+        0.0, 0.0, B,    0.0
+    );
+    return proj * view;
+}
+
+float sample_shadow(vec3 worldPos, vec3 N, vec3 lightDir, mat4 light_clip_from_world, int shadowSlot)
 {
-    vec4 lightClip = pc.LIGHT_CLIP_FROM_WORLD * vec4(worldPos, 1.0);
-    vec3 lightNDC = lightClip.xyz / max(lightClip.w, 0.0001);
+     
+     vec4 lightClip = light_clip_from_world * vec4(worldPos, 1.0);
+    if (lightClip.w <= 0.0) return 1.0; // behind light camera
+    vec3 lightNDC = lightClip.xyz / lightClip.w;
+    
 
     vec2 shadowUV = lightNDC.xy * 0.5 + 0.5;
-   float currentDepth = lightNDC.z * 0.5 + 0.5;
+   float currentDepth = lightNDC.z;
 
     if (shadowUV.x < 0.0 || shadowUV.x > 1.0 ||
         shadowUV.y < 0.0 || shadowUV.y > 1.0 ||
@@ -90,13 +126,13 @@ float sample_shadow(vec3 worldPos, vec3 N, vec3 lightDir)
 
     float bias = max(0.0005, 0.002 * (1.0 - max(dot(N, lightDir), 0.0)));
 
-    vec2 texel = 1.0 / vec2(textureSize(SHADOW_MAP, 0));
+    vec2 texel = 1.0 / vec2(textureSize(SHADOW_MAPS[shadowSlot], 0));
     float sum = 0.0;
 
     for (int x = 0; x < 2; ++x) {
         for (int y = 0; y < 2; ++y) {
             vec2 offset = vec2(x - 0.5, y - 0.5) * texel;
-            float closestDepth = texture(SHADOW_MAP, shadowUV + offset).r;
+            float closestDepth = texture(SHADOW_MAPS[shadowSlot], shadowUV + offset).r;
             sum += (currentDepth - bias > closestDepth) ? 0.0 : 1.0;
         }
     }
@@ -152,9 +188,17 @@ void main() {
 
 vec3 directLights = vec3(0.0);
 
+int shadowSlot = 0;
+
 for (int i = 0; i < lights.length(); ++i) {
  
     float lightType = lights[i].position.w;
+
+     int myShadowSlot = -1;
+    if (lightType == 2.0 && lights[i].tint.w > 0.0 && shadowSlot < MAX_SHADOW_SPOT_LIGHTS) {
+        myShadowSlot = shadowSlot;
+        shadowSlot += 1;
+    }
 
     if (lightType == 1.0 || lightType == 2.0) {
         vec3 Lvec = lights[i].position.xyz - position;
@@ -196,32 +240,14 @@ for (int i = 0; i < lights.length(); ++i) {
         float power = lights[i].params.y;
 
        float shadow = 1.0;
-if (lightType == 2.0 && i == pc.SHADOW_LIGHT_INDEX) {
-    shadow = sample_shadow(position, N_ws, L);
-}
+        if (myShadowSlot >= 0) {
+            mat4 light_clip_from_world = make_spot_light_matrix(lights[i]);
+            shadow = sample_shadow(position, N_ws, L, light_clip_from_world, myShadowSlot);
+        }
 
         directLights += shadow * albedo * lights[i].tint.rgb * power * NdotL * attenuation * spotFactor;
     }
 }
 
-//outColor = vec4(0.08 * albedo + directLights, 1.0);
-vec4 lightClip = pc.LIGHT_CLIP_FROM_WORLD * vec4(position, 1.0);
-vec3 lightNDC = lightClip.xyz / max(lightClip.w, 0.0001);
-vec2 shadowUV = vec2(
-    lightNDC.x * 0.5 + 0.5,
-    1.0 - (lightNDC.y * 0.5 + 0.5)
-);
-float z01 = lightNDC.z * 0.5 + 0.5;
-
-bool inside =
-    shadowUV.x >= 0.0 && shadowUV.x <= 1.0 &&
-    shadowUV.y >= 0.0 && shadowUV.y <= 1.0 &&
-    z01 >= 0.0 && z01 <= 1.0;
-
-if (!inside) {
-    outColor = vec4(1.0, 0.0, 0.0, 1.0); // red = outside shadow map
-} else {
-    float d = texture(SHADOW_MAP, shadowUV).r;
-    outColor = vec4(vec3(d), 1.0);       // grayscale depth only for valid samples
-}
+ outColor = vec4(0.08 * albedo + directLights, 1.0);
 }

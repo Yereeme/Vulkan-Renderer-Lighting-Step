@@ -1616,20 +1616,27 @@ VkDescriptorImageInfo brdf_info{
 					.range = VK_WHOLE_SIZE
 				};
 
-				VkDescriptorImageInfo shadow_info{
-	.sampler = shadow_sampler,
-	.imageView = shadow_map_views[0],
-	.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-				};
+				constexpr uint32_t MAX_SHADOW_SPOT_LIGHTS = 16;
+				std::array<VkDescriptorImageInfo, MAX_SHADOW_SPOT_LIGHTS> shadow_infos{};
+				VkImageView fallback_view = shadow_map_views.empty() ? VK_NULL_HANDLE : shadow_map_views[0];
+				for (uint32_t si = 0; si < MAX_SHADOW_SPOT_LIGHTS; ++si) {
+					VkImageView v = fallback_view;
+					if (si < shadow_map_views.size()) v = shadow_map_views[si];
+					shadow_infos[si] = VkDescriptorImageInfo{
+						.sampler = shadow_sampler,
+						.imageView = v,
+						.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+					};
+				}
 
 				VkWriteDescriptorSet shadow_write{
 					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 					.dstSet = workspace.Shadow_descriptors,
 					.dstBinding = 0,
 					.dstArrayElement = 0,
-					.descriptorCount = 1,
+					.descriptorCount = MAX_SHADOW_SPOT_LIGHTS,
 					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-					.pImageInfo = &shadow_info,
+					.pImageInfo = shadow_infos.data(),
 				};
 
 				for (size_t li = 0; li < shadow_spot_lights.size(); ++li) {
@@ -3936,13 +3943,13 @@ void Tutorial::render(RTG& rtg_, RTG::RenderParams const& render_params) {
 			nullptr
 		);
 
-		std::cout << "shadow draw count: " << object_instances.size() << "\n";
+		//std::cout << "shadow draw count: " << object_instances.size() << "\n";
 
-		if (!object_instances.empty()) {
+		/*if (!object_instances.empty()) {
 			std::cout << "first shadow verts: "
 				<< object_instances[0].vertices.first << " "
 				<< object_instances[0].vertices.count << "\n";
-		}
+		}*/
 
 		for (uint32_t i = 0; i < object_instances.size(); ++i) {
 			auto const& inst = object_instances[i];
@@ -4174,8 +4181,13 @@ void Tutorial::render(RTG& rtg_, RTG::RenderParams const& render_params) {
 			 
 				if (!object_instances.empty()) {
 					 
-					for (size_t li = 0; li < shadow_spot_lights.size(); ++li) {
-						mat4 m = make_spot_light_matrix(*shadow_spot_lights[li]);
+					for (size_t li = 0; li < 1; ++li) {
+						mat4 m = (!shadow_spot_lights.empty())
+							? make_spot_light_matrix(*shadow_spot_lights[0])
+							: mat4{ 1.0f, 0.0f, 0.0f, 0.0f,
+								   0.0f, 1.0f, 0.0f, 0.0f,
+								   0.0f, 0.0f, 1.0f, 0.0f,
+								   0.0f, 0.0f, 0.0f, 1.0f };
 						VkBuffer vb = object_vertices.handle;
 						VkDeviceSize off = 0;
 						vkCmdBindVertexBuffers(workspace.command_buffer, 0, 1, &vb, &off);
@@ -4205,7 +4217,7 @@ void Tutorial::render(RTG& rtg_, RTG::RenderParams const& render_params) {
 								material_descriptors_lam[set2_idx],           // set 2
 								env_lambertian_descriptors,                   // set 3
 								workspace.Lights_descriptors,                 // set 4
-								workspace.Shadow_descriptors_per_light[li]    // set 5
+								workspace.Shadow_descriptors                  // set 5                                                                                                                                       
 							};
 
 							vkCmdBindDescriptorSets(
@@ -4225,7 +4237,7 @@ void Tutorial::render(RTG& rtg_, RTG::RenderParams const& render_params) {
 
 							 
 							push.LIGHT_CLIP_FROM_WORLD = m;
-							push.SHADOW_LIGHT_INDEX = int32_t(li);
+							push.SHADOW_LIGHT_INDEX = -1;
 
 							vkCmdPushConstants(
 								workspace.command_buffer,
@@ -4266,7 +4278,7 @@ void Tutorial::render(RTG& rtg_, RTG::RenderParams const& render_params) {
    material_descriptors_pbr[inst.texture],       // set 2
    workspace.PBR_Env_descriptors,                // set 3
    workspace.Lights_descriptors,                 // set 4
-   workspace.Shadow_descriptors_per_light[li]    // set 5
+   workspace.Shadow_descriptors    // set 5
 								};
 
 								vkCmdBindDescriptorSets(
@@ -4300,7 +4312,7 @@ void Tutorial::render(RTG& rtg_, RTG::RenderParams const& render_params) {
 								push.camera_ws = cam_pos;
 								push.exposure = rtg.configuration.exposure;
 								push.tone_op = (rtg.configuration.tone_map == "reinhard") ? 1 : 0;
-								push.SHADOW_LIGHT_INDEX = int32_t(li);
+								push.SHADOW_LIGHT_INDEX = -1;
 								vkCmdPushConstants(workspace.command_buffer, pbr_pipeline.layout,
 									VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
 									0, sizeof(push), &push);

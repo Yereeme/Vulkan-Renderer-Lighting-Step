@@ -51,7 +51,8 @@ layout(set = 4, binding = 0) readonly buffer Lights {
 
 // Shadow map written in the shadow pass, read in the lighting pass.
  
-layout(set = 5, binding = 0) uniform sampler2D SHADOW_MAP;
+ const int MAX_SHADOW_SPOT_LIGHTS = 16;
+layout(set = 5, binding = 0) uniform sampler2D SHADOW_MAPS[MAX_SHADOW_SPOT_LIGHTS];
 
 
 layout(location = 0) out vec4 outColor;
@@ -92,9 +93,41 @@ float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
 // Returns 1.0 when lit, 0.0 when shadowed.
 // This is a basic hard-shadow test.
 // Later you can turn this into PCF by averaging multiple nearby samples.
-float sample_shadow(vec3 worldPos, vec3 N, vec3 lightDir)
+mat4 make_spot_light_matrix(GPULight light) {
+    vec3 F = normalize(light.direction.xyz);
+    vec3 up = vec3(0.0, 1.0, 0.0);
+    if (abs(dot(F, up)) > 0.99) up = vec3(1.0, 0.0, 0.0);
+
+    vec3 R = normalize(cross(up, F));
+    vec3 U = cross(F, R);
+    vec3 P = light.position.xyz;
+
+    mat4 view = mat4(
+        R.x, U.x, -F.x, 0.0,
+        R.y, U.y, -F.y, 0.0,
+        R.z, U.z, -F.z, 0.0,
+        -dot(R, P), -dot(U, P), dot(F, P), 1.0
+    );
+
+    float near_ = 0.1;
+    float far_ = 100.0;
+    float e = 1.0 / tan(light.params.w * 0.5);
+    float A = -0.5 - 0.5 * (far_ + near_) / (far_ - near_);
+    float B = -(far_ * near_) / (far_ - near_);
+
+    mat4 proj = mat4(
+        e,   0.0, 0.0,  0.0,
+        0.0, -e,  0.0,  0.0,
+        0.0, 0.0, A,   -1.0,
+        0.0, 0.0, B,    0.0
+    );
+    return proj * view;
+}
+
+float sample_shadow(vec3 worldPos, vec3 N, vec3 lightDir, mat4 light_clip_from_world, int shadowSlot)
 {
-    vec4 lightClip = pc.LIGHT_CLIP_FROM_WORLD * vec4(worldPos, 1.0);
+    vec4 lightClip = light_clip_from_world * vec4(worldPos, 1.0);
+    if (lightClip.w <= 0.0) return 1.0;
     vec3 lightNDC = lightClip.xyz / lightClip.w;
 
     vec2 shadowUV = lightNDC.xy * 0.5 + 0.5;
@@ -106,7 +139,7 @@ float sample_shadow(vec3 worldPos, vec3 N, vec3 lightDir)
         return 1.0;
     }
 
-    float closestDepth = texture(SHADOW_MAP, shadowUV).r;
+    float closestDepth = texture(SHADOW_MAPS[shadowSlot], shadowUV).r;
 
     float bias = max(0.0005, 0.002 * (1.0 - max(dot(N, lightDir), 0.0)));
 
@@ -213,8 +246,16 @@ vec3 specularSun = ((NDFsun * Gsun * Fsun) / (4.0 * NdotV * NdotLsunSpec + 0.000
     // 6. FINAL COMBINATION
     vec3 directLights = vec3(0.0);
 
+    int shadowSlot = 0;
+
 for (int i = 0; i < lights.length(); ++i) {
     float lightType = lights[i].position.w;
+
+    int myShadowSlot = -1;
+    if (lightType == 2.0 && lights[i].tint.w > 0.0 && shadowSlot < MAX_SHADOW_SPOT_LIGHTS) {
+        myShadowSlot = shadowSlot;
+        shadowSlot += 1;
+    }
    
 
     // for now: treat sphere + spot as point-style direct lights
@@ -293,8 +334,9 @@ float NdotLspec = max(dot(N, Lspec), 0.0);
         vec3 radiance = lights[i].tint.rgb * lights[i].params.y * attenuation * spotFactor;
 float shadow = 1.0;
 
-if (lightType == 2.0 && i == pc.SHADOW_LIGHT_INDEX) {
-    shadow = sample_shadow(worldPos, N, Ldyn);
+if (myShadowSlot >= 0) {
+    mat4 light_clip_from_world = make_spot_light_matrix(lights[i]);
+    shadow = sample_shadow(worldPos, N, Ldyn, light_clip_from_world, myShadowSlot);
 }
 
 directLights += shadow * (diffuseDyn + specularDyn) * radiance * NdotLdyn;

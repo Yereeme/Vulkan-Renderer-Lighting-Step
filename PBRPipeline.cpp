@@ -141,10 +141,11 @@ void Tutorial::PBRPipeline::create(RTG& rtg, VkRenderPass render_pass, uint32_t 
 	}
 
 	{//set5_Shadow
+		constexpr uint32_t MAX_SHADOW_SPOT_LIGHTS = 16;
 		VkDescriptorSetLayoutBinding shadow_binding{};
 		shadow_binding.binding = 0;
 		shadow_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		shadow_binding.descriptorCount = 1;
+		shadow_binding.descriptorCount = MAX_SHADOW_SPOT_LIGHTS;
 		shadow_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 		shadow_binding.pImmutableSamplers = nullptr;
 

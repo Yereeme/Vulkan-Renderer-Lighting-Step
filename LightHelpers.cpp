@@ -168,7 +168,9 @@ void collect_loaded_lights_from_node(
 	//std::cout << "visiting node: " << node->name << std::endl;
 
 	mat4 local_from_node = make_local_from_node(node);
-	mat4 world_from_local = local_from_node * parent_world_from_local;
+	// compose transforms in parent->child order:
+// WORLD_FROM_LOCAL = PARENT_WORLD_FROM_LOCAL * LOCAL_FROM_NODE
+	mat4 world_from_local = parent_world_from_local * local_from_node;
 
 	if (node->light) {
 		//std::cout << "node " << node->name << " has light ptr " << node->light << std::endl;
