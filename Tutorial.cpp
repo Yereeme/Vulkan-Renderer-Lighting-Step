@@ -1747,26 +1747,25 @@ VkDescriptorImageInfo brdf_info{
 					};
 
 					// --- Tint (color) ---
-					// xyz = light color
-					// w   = unused (set to 1)
+						// xyz = light color
+						// w   = shadow map size (used by shader to identify shadow-casting spots)
 					gpu.tint = {
 						light.tint.x,
 						light.tint.y,
 						light.tint.z,
-						1.0f
+						light.shadow
 					};
 
 					// --- Parameters ---
-					// x = radius
-					// y = power
-					// z = limit (falloff distance)
-					// w = unused for now
-					gpu.params = {
-						 light.radius,
-	light.power,
-	light.limit,
-	light.fov
-					};
+					// Sun:    x = angle, y = strength
+					// Sphere: x = radius, y = power, z = limit
+					// Spot:   x = radius, y = power, z = limit, w = fov
+					if (light.type == LoadedLight::Type::Sun) {
+						gpu.params = { light.angle, light.strength, 0.0f, 0.0f };
+					}
+					else {
+						gpu.params = { light.radius, light.power, light.limit, light.fov };
+					}
 
 					// Store this light into the array
 					gpu_lights.emplace_back(gpu);
@@ -3749,7 +3748,12 @@ void Tutorial::render(RTG& rtg_, RTG::RenderParams const& render_params) {
 			g.position = { l.world_position.x, l.world_position.y, l.world_position.z, type_value };
 			g.direction = { l.world_direction.x, l.world_direction.y, l.world_direction.z, l.blend };
 			g.tint = { l.tint.x, l.tint.y, l.tint.z, l.shadow };
-			g.params = { l.radius, l.power, l.limit, l.fov };
+			if (l.type == LoadedLight::Type::Sun) {
+				g.params = { l.angle, l.strength, 0.0f, 0.0f };
+			}
+			else {
+				g.params = { l.radius, l.power, l.limit, l.fov };
+			}
 
 			gpu_lights.push_back(g);
 		}

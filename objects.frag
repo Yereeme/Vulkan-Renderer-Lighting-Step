@@ -194,6 +194,16 @@ for (int i = 0; i < lights.length(); ++i) {
  
     float lightType = lights[i].position.w;
 
+    if (lightType == 0.0) {
+        vec3 Lsun = normalize(lights[i].direction.xyz);
+        float NdotLsun = max(dot(N_ws, Lsun), 0.0);
+        if (NdotLsun <= 0.0) continue;
+
+        float sunStrength = lights[i].params.y;
+        directLights += albedo * lights[i].tint.rgb * sunStrength * NdotLsun;
+        continue;
+    }
+
      int myShadowSlot = -1;
     if (lightType == 2.0 && lights[i].tint.w > 0.0 && shadowSlot < MAX_SHADOW_SPOT_LIGHTS) {
         myShadowSlot = shadowSlot;

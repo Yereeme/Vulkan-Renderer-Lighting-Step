@@ -168,66 +168,9 @@ vec3 V = normalize(pc.camera_ws - worldPos);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
     
-    // 4. DIRECT LIGHTING (SUN)
-// Diffuse still uses the sun center direction.
-// Specular uses a "best direction inside the sun disk" approximation.
+   
 
-vec3 sunDir = normalize(SUN_DIRECTION);
-
-// --- diffuse from center direction ---
-float NdotLsun = max(dot(N, sunDir), 0.0);
-
-// --- find a better direction for specular ---
-// Reflection direction from the surface
-vec3 Rsun = normalize(reflect(-V, N));
-
-// Sun angular radius approximation.
-// Small fixed value for now because your World block only gives direction + energy.
-// You can tune this later if needed.
-float sunAngle = 0.01;
-
-// cos(max angle from sun center)
-float cosSun = cos(sunAngle);
-
-// Start with the reflection direction
-vec3 sunSpecDir = Rsun;
-
-// If reflection is outside the sun cone,
-// clamp it back to the closest direction on the cone.
-float cosToCenter = dot(Rsun, sunDir);
-if (cosToCenter < cosSun) {
-    vec3 axis = cross(sunDir, Rsun);
-    float axisLen = length(axis);
-
-    if (axisLen > 0.0001) {
-        axis /= axisLen;
-
-        // tangent direction on the sun cone boundary
-        vec3 tangent = normalize(cross(axis, sunDir));
-
-        float sinSun = sqrt(max(1.0 - cosSun * cosSun, 0.0));
-        sunSpecDir = normalize(sunDir * cosSun + tangent * sinSun);
-    } else {
-        // reflection parallel/opposite to sun direction
-        sunSpecDir = sunDir;
-    }
-}
-
-// --- PBR specular uses the adjusted sun direction ---
-float NdotLsunSpec = max(dot(N, sunSpecDir), 0.0);
-vec3 Hsun = normalize(V + sunSpecDir);
-
-float NDFsun = DistributionGGX(N, Hsun, roughness);
-float Gsun = GeometrySmith(N, V, sunSpecDir, roughness);
-vec3 Fsun = fresnelSchlick(max(dot(Hsun, V), 0.0), F0);
-
-vec3 kD_sun = (vec3(1.0) - Fsun) * (1.0 - metallic);
-
-vec3 diffuseSun = (kD_sun * albedo / PI) * SUN_ENERGY * NdotLsun;
-vec3 specularSun = ((NDFsun * Gsun * Fsun) / (4.0 * NdotV * NdotLsunSpec + 0.0001))
-                 * SUN_ENERGY * NdotLsunSpec;
-
-    // 5. INDIRECT LIGHTING (IBL)
+    // 4. INDIRECT LIGHTING (IBL)
     vec3 F_ibl = fresnelSchlickRoughness(NdotV, F0, roughness);
     vec3 kD_ibl = (1.0 - F_ibl) * (1.0 - metallic);
 
@@ -243,7 +186,7 @@ vec3 specularSun = ((NDFsun * Gsun * Fsun) / (4.0 * NdotV * NdotLsunSpec + 0.000
     vec2 brdfEnv = texture(BRDF_LUT, vec2(NdotV, 1.0 - roughness)).rg;
     vec3 specularIBL = prefiltered * (F0 * brdfEnv.x + brdfEnv.y);
 
-    // 6. FINAL COMBINATION
+    // 5. FINAL COMBINATION
     vec3 directLights = vec3(0.0);
 
     int shadowSlot = 0;
@@ -259,6 +202,51 @@ for (int i = 0; i < lights.length(); ++i) {
    
 
     // for now: treat sphere + spot as point-style direct lights
+
+    if (lightType == 0.0) {
+        vec3 sunDir = normalize(lights[i].direction.xyz);
+        float sunAngle = max(lights[i].params.x, 0.0001);
+        float sunStrength = lights[i].params.y;
+
+        float NdotLsun = max(dot(N, sunDir), 0.0);
+        if (NdotLsun <= 0.0) continue;
+
+        vec3 Rsun = normalize(reflect(-V, N));
+        float cosSun = cos(sunAngle);
+        float cosToCenter = dot(Rsun, sunDir);
+        vec3 sunSpecDir = Rsun;
+
+        if (cosToCenter < cosSun) {
+            vec3 axis = cross(sunDir, Rsun);
+            float axisLen = length(axis);
+            if (axisLen > 0.0001) {
+                axis /= axisLen;
+                vec3 tangent = normalize(cross(axis, sunDir));
+                float sinSun = sqrt(max(1.0 - cosSun * cosSun, 0.0));
+                sunSpecDir = normalize(sunDir * cosSun + tangent * sinSun);
+            } else {
+                sunSpecDir = sunDir;
+            }
+        }
+
+        float NdotLsunSpec = max(dot(N, sunSpecDir), 0.0);
+        if (NdotLsunSpec <= 0.0) continue;
+
+        vec3 Hsun = normalize(V + sunSpecDir);
+        float NDFsun = DistributionGGX(N, Hsun, roughness);
+        float Gsun = GeometrySmith(N, V, sunSpecDir, roughness);
+        vec3 Fsun = fresnelSchlick(max(dot(Hsun, V), 0.0), F0);
+        vec3 kD_sun = (vec3(1.0) - Fsun) * (1.0 - metallic);
+        vec3 diffuseSun = kD_sun * albedo / PI;
+        vec3 specularSun = (NDFsun * Gsun * Fsun) / (4.0 * NdotV * NdotLsunSpec + 0.0001);
+
+        vec3 sunRadiance = lights[i].tint.rgb * sunStrength;
+        directLights += (diffuseSun * NdotLsun + specularSun * NdotLsunSpec) * sunRadiance;
+        continue;
+    }
+
+    // treat sphere + spot as point/area approximations
+
     if (lightType == 1.0 || lightType == 2.0) {
         vec3 Lvec = lights[i].position.xyz - worldPos;
         float d = length(Lvec);
@@ -344,7 +332,7 @@ directLights += shadow * (diffuseDyn + specularDyn) * radiance * NdotLdyn;
 }
 
 vec3 ambient = (kD_ibl * diffuseIBL) + specularIBL;
-vec3 finalColor = ambient + diffuseSun + specularSun + directLights;
+vec3 finalColor = ambient + directLights;
 
 outColor = vec4(apply_tone_map(finalColor * exp2(pc.exposure), pc.tone_op), 1.0);
 }
