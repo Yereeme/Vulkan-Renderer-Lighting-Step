@@ -1,7 +1,7 @@
 {
     "Version": "1.2",
     "Data": {
-        "Source": "c:\\users\\aykone\\a3\\code\\tutorial.cpp",
+        "Source": "c:\\users\\aykone\\a3\\code\\shadowpipeline.cpp",
         "ProvidedModule": "",
         "Includes": [
             "c:\\users\\aykone\\a3\\code\\tutorial.hpp",
@@ -195,20 +195,7 @@
             "c:\\users\\aykone\\a3\\code\\inputevent.hpp",
             "c:\\program files\\microsoft visual studio\\2022\\community\\vc\\tools\\msvc\\14.44.35207\\include\\functional",
             "c:\\users\\aykone\\a3\\code\\vk.hpp",
-            "c:\\users\\aykone\\a3\\code\\lighthelpers.hpp",
-            "c:\\users\\aykone\\a3\\glfw-3.4.bin.win64\\include\\glfw\\glfw3.h",
-            "c:\\program files (x86)\\windows kits\\10\\include\\10.0.26100.0\\um\\gl\\gl.h",
-            "c:\\program files (x86)\\windows kits\\10\\include\\10.0.26100.0\\shared\\winapifamily.h",
-            "c:\\program files (x86)\\windows kits\\10\\include\\10.0.26100.0\\shared\\winpackagefamily.h",
-            "c:\\program files\\microsoft visual studio\\2022\\community\\vc\\tools\\msvc\\14.44.35207\\include\\cassert",
-            "c:\\program files (x86)\\windows kits\\10\\include\\10.0.26100.0\\ucrt\\assert.h",
-            "c:\\program files\\microsoft visual studio\\2022\\community\\vc\\tools\\msvc\\14.44.35207\\include\\iostream",
-            "c:\\program files\\microsoft visual studio\\2022\\community\\vc\\tools\\msvc\\14.44.35207\\include\\ostream",
-            "c:\\program files\\microsoft visual studio\\2022\\community\\vc\\tools\\msvc\\14.44.35207\\include\\fstream",
-            "c:\\program files\\microsoft visual studio\\2022\\community\\vc\\tools\\msvc\\14.44.35207\\include\\__msvc_filebuf.hpp",
-            "c:\\program files\\microsoft visual studio\\2022\\community\\vc\\tools\\msvc\\14.44.35207\\include\\filesystem",
-            "c:\\users\\aykone\\a3\\code\\external\\tinyobjloader\\tiny_obj_loader.h",
-            "c:\\users\\aykone\\a3\\code\\external\\tinyobjloader\\stb_image.h"
+            "c:\\users\\aykone\\a3\\code\\spv\\shadow.vert.inl"
         ],
         "ImportedModules": [],
         "ImportedHeaderUnits": []

@@ -49,6 +49,8 @@ struct Tutorial : RTG::Application {
 	//Render passes describe how pipelines write to images:
 	VkRenderPass render_pass = VK_NULL_HANDLE;
 
+	VkRenderPass shadow_render_pass = VK_NULL_HANDLE;
+
 	//Pipelines:
 	//...
 	//adding BackgroundPipeline member structure to Tutorial.cppp
@@ -112,6 +114,8 @@ struct Tutorial : RTG::Application {
 		VkDescriptorSetLayout set1_Transforms = VK_NULL_HANDLE;
 		VkDescriptorSetLayout set2_TEXTURE = VK_NULL_HANDLE;
 		VkDescriptorSetLayout set3_EnvLambertian = VK_NULL_HANDLE;
+		VkDescriptorSetLayout set4_Lights = VK_NULL_HANDLE;
+		VkDescriptorSetLayout set5_Shadow = VK_NULL_HANDLE;
 
 		struct World {
 			struct { float x, y, z, padding_; } SKY_DIRECTION;
@@ -121,12 +125,19 @@ struct Tutorial : RTG::Application {
 		};
 		static_assert(sizeof(World) == 4 * 4 + 4 * 4 + 4 * 4 + 4 * 4, "World is the expected size.");
 
+		struct Push {
+			mat4 LIGHT_CLIP_FROM_WORLD;
+			int32_t SHADOW_LIGHT_INDEX;
+			int32_t _pad[3];
+		};
+		static_assert(sizeof(Push) == 80, "Objects Push must be 80 bytes.");
 
 		//using Camera = LinesPipeline::Camera;
 		struct Transform { //storage buffer descriptor set layout
 			mat4 CLIP_FROM_LOCAL;
 			mat4 WORLD_FROM_LOCAL;
 			mat4 WORLD_FROM_LOCAL_NORMAL;
+
 		};
 		static_assert(sizeof(Transform) == 16*4 + 16*4 + 16*4, "Transform is the expected size.");
 	 
@@ -195,18 +206,24 @@ struct Tutorial : RTG::Application {
 		VkDescriptorSetLayout set1_Transforms = VK_NULL_HANDLE;
 		VkDescriptorSetLayout set2_TEXTURE = VK_NULL_HANDLE;
 		VkDescriptorSetLayout set3_EnvPBR = VK_NULL_HANDLE;
+		VkDescriptorSetLayout set4_Lights = VK_NULL_HANDLE;
+		VkDescriptorSetLayout set5_Shadow = VK_NULL_HANDLE;
 
 		struct Push {
-			mat4 CLIP_FROM_LOCAL;   // 64 bytes
-			mat4 WORLD_FROM_LOCAL;  // 64 bytes
-			S72::vec3 camera_ws;    // 12 bytes
-			float exposure;         // 4 bytes
-			int32_t tone_op;        // 4 bytes
-			float _padding[3];      // 12 bytes (MUST be 3 floats to reach 160)
-		};
-		static_assert(sizeof(Push) == 160, "PBR Push must be 160 bytes!");
+			mat4 CLIP_FROM_LOCAL;        // 64
+			mat4 WORLD_FROM_LOCAL;       // 64
+			mat4 LIGHT_CLIP_FROM_WORLD;  // 64
 
-		//types for descriptors: (reuse object pipeline ones)
+			S72::vec3 camera_ws;         // 12
+			float exposure;              // 4  -> 16
+
+			int32_t tone_op;             // 4
+			int32_t SHADOW_LIGHT_INDEX;  // 4
+			float _padding[2];           // 8  -> tail = 16
+		};
+		static_assert(sizeof(Push) == 224, "PBR Push must be 224 bytes!");
+
+		//types for descriptors: (i reuse object pipeline ones)
 		using World = ObjectsPipeline::World;
 		using Transform = ObjectsPipeline::Transform;
 
@@ -250,7 +267,15 @@ struct Tutorial : RTG::Application {
 		Helpers::AllocatedBuffer Transforms; //device-local
 		VkDescriptorSet Transforms_descriptors; //references Tranforms
 
+		//gpu location for lights data 
+		Helpers::AllocatedBuffer Lights; //host coherent; mapped
+		VkDescriptorSet Lights_descriptors = VK_NULL_HANDLE;
+
 		VkDescriptorSet PBR_Env_descriptors = VK_NULL_HANDLE;
+
+		VkDescriptorSet Shadow_descriptors = VK_NULL_HANDLE;
+
+		std::vector<VkDescriptorSet> Shadow_descriptors_per_light;
 
 	 
 
@@ -339,8 +364,16 @@ struct Tutorial : RTG::Application {
 	Helpers::AllocatedImage swapchain_depth_image;
 	VkImageView swapchain_depth_image_view = VK_NULL_HANDLE;
 	std::vector< VkFramebuffer > swapchain_framebuffers;
+
 	//used from on_swapchain and the destructor: (framebuffers are created in on_swapchain)
 	void destroy_framebuffers();
+
+	//shadow map size and stuff members
+	std::vector<Helpers::AllocatedImage> shadow_maps;; //GPU image (texture) that stores depth
+	std::vector<VkImageView> shadow_map_views;
+	std::vector<VkFramebuffer> shadow_framebuffers;
+	
+	 
 
 	//--------------------------------------------------------------------
 	//Resources that change when time passes or the user interacts:
@@ -419,6 +452,9 @@ struct Tutorial : RTG::Application {
 
 	VkDescriptorSet env_pbr_descriptors = VK_NULL_HANDLE; // set=3 for PBRPipeline
 
+	Helpers::AllocatedImage dummy_brdf_lut;
+	VkImageView dummy_brdf_lut_view = VK_NULL_HANDLE;
+
 
 	//computed from the current camera (as set by camera_mode) during update():
 	mat4 CLIP_FROM_WORLD; //matrix through which to view grid line
@@ -427,6 +463,68 @@ struct Tutorial : RTG::Application {
 	std::vector< LinesPipeline::Vertex > lines_vertices;
 
 	ObjectsPipeline::World world;
+
+	struct LoadedLight {
+		enum class Type {
+			Sun,
+			Sphere,
+			Spot
+		};
+
+		Type type = Type::Sun;
+
+		std::string name;
+
+		S72::vec3 tint = { 1.0f, 1.0f, 1.0f };
+		S72::vec3 world_position = { 0.0f, 0.0f, 0.0f };
+		S72::vec3 world_direction = { 0.0f, 0.0f, -1.0f };
+		float shadow = 0.0f;
+
+		mat4 world_from_local = {
+			1.0f, 0.0f, 0.0f, 0.0f,
+			0.0f, 1.0f, 0.0f, 0.0f,
+			0.0f, 0.0f, 1.0f, 0.0f,
+			0.0f, 0.0f, 0.0f, 1.0f
+		};
+
+		float radius = 0.0f;
+		float power = 0.0f;
+		float limit = 0.0f;
+
+		float angle = 0.0f;
+		float strength = 0.0f;
+
+		float fov = 0.0f;
+		float blend = 0.0f;
+	};
+
+	std::vector<LoadedLight> loaded_lights;
+	std::vector<LoadedLight*> shadow_spot_lights;
+	VkSampler shadow_sampler = VK_NULL_HANDLE;
+
+	struct GPULight {
+		vec4 position;
+		vec4 direction;
+		vec4 tint;
+		vec4 params;
+	};
+
+	struct ShadowPush {
+		mat4 LIGHT_CLIP_FROM_WORLD;
+		int32_t OBJECT_INDEX;
+		int32_t _pad[3];
+	};
+	static_assert(sizeof(ShadowPush) == 80, "ShadowPush must be 80.");
+
+	struct ShadowPipeline {
+		VkDescriptorSetLayout set1_Transforms = VK_NULL_HANDLE;
+
+		VkPipeline handle = VK_NULL_HANDLE;
+		VkPipelineLayout layout = VK_NULL_HANDLE;
+
+		void create(RTG& rtg, VkRenderPass render_pass, uint32_t subpass);
+		void destroy(RTG& rtg);
+	} shadow_pipeline;
 
 	struct ObjectInstance {
 		ObjectVertices vertices;

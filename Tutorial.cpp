@@ -1,7 +1,7 @@
 ﻿#include "Tutorial.hpp"
 
 #include "VK.hpp"
-
+#include "LightHelpers.hpp"
 #include <GLFW/glfw3.h>
 #include <variant>
 #include <vector>
@@ -15,6 +15,7 @@
 #include <functional>
 #include <unordered_map>
 #include <filesystem>
+
 
  
 #include "external\tinyobjloader\tiny_obj_loader.h"
@@ -31,33 +32,9 @@ static mat4 mat4_transpose(mat4 const& m) {
 	};
 }
 
-static mat4 mat4_inverse_rigid(mat4 const& M) {
-	// Assumes M is rotation + translation only (no scale/shear).
-	// Extract rotation (upper-left 3x3)
-	float r00 = M[0], r01 = M[4], r02 = M[8];
-	float r10 = M[1], r11 = M[5], r12 = M[9];
-	float r20 = M[2], r21 = M[6], r22 = M[10];
+ 
 
-	// Transpose rotation (Inverse of a rotation matrix is its transpose)
-	float t00 = r00, t01 = r10, t02 = r20;
-	float t10 = r01, t11 = r11, t12 = r21;
-	float t20 = r02, t21 = r12, t22 = r22;
 
-	// Translation column
-	float tx = M[12], ty = M[13], tz = M[14];
-
-	// New translation = -R^T * translation
-	float ntx = -(t00 * tx + t01 * ty + t02 * tz);
-	float nty = -(t10 * tx + t11 * ty + t12 * tz);
-	float ntz = -(t20 * tx + t21 * ty + t22 * tz);
-
-	return mat4{
-		t00, t10, t20, 0.0f,
-		t01, t11, t21, 0.0f,
-		t02, t12, t22, 0.0f,
-		ntx, nty, ntz, 1.0f
-	};
-}
 
 
 static void upload_cubemap_faces_rgba8(
@@ -399,7 +376,12 @@ static Helpers::AllocatedImage create_cubemap_image_mips(
 		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
 	};
 
-	VK(vkCreateImage(rtg.device, &create_info, nullptr, &image.handle));
+	//VK(vkCreateImage(rtg.device, &create_info, nullptr, &image.handle));
+	VkResult res = vkCreateImage(rtg.device, &create_info, nullptr, &image.handle);
+	if (res != VK_SUCCESS || image.handle == VK_NULL_HANDLE) {
+		std::cout << "FAILED to create cubemap image\n";
+		abort();
+	}
 
 	VkMemoryRequirements req;
 	vkGetImageMemoryRequirements(rtg.device, image.handle, &req);
@@ -582,8 +564,29 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 	uint32_t rough_default_idx = 0;
 	uint32_t metal_default_idx = 0;
 
+	
 	auto write_pbr_env_set3 = [&](VkDescriptorSet dst_set) {
-		VkDescriptorImageInfo lam_info{
+		//if (!has_env_lambertian || !has_env_ggx || !has_brdf_lut) {
+			//return; // skip if anything missing
+		//}
+		// fallback to dummy if missing
+		 
+		std::cout << "WRITE PBR ENV CALLED\n";
+
+		VkImageView lamView =
+			(env_lambertian_cubemap_view != VK_NULL_HANDLE)
+			? env_lambertian_cubemap_view
+			: env_cubemap_view;
+
+		VkImageView ggxView =
+			(env_ggx_cubemap_view != VK_NULL_HANDLE)
+			? env_ggx_cubemap_view
+			: env_cubemap_view;
+
+		
+		VkImageView brdfView =
+			(brdf_lut_view != VK_NULL_HANDLE) ? brdf_lut_view : dummy_brdf_lut_view; // (keep it, no fallback for now)
+		/*VkDescriptorImageInfo lam_info{
 			.sampler = env_sampler,
 			.imageView = env_lambertian_cubemap_view,
 			.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -597,7 +600,23 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 			.sampler = env_sampler,
 			.imageView = brdf_lut_view,
 			.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		};
+		};*/
+
+VkDescriptorImageInfo lam_info{
+	.sampler = env_sampler,
+	.imageView = lamView,
+	.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+};
+VkDescriptorImageInfo ggx_info{
+	.sampler = env_sampler,
+	.imageView = ggxView,
+	.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+};
+VkDescriptorImageInfo brdf_info{
+	.sampler = env_sampler,
+	.imageView = brdfView,
+	.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+};
 
 		std::array<VkWriteDescriptorSet, 3> writes{
 			VkWriteDescriptorSet{
@@ -626,6 +645,11 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 			},
 		};
 
+		std::cout
+			<< "lam: " << env_lambertian_cubemap_view << "\n"
+			<< "ggx: " << env_ggx_cubemap_view << "\n"
+			<< "brdf: " << brdf_lut_view << "\n"
+			<< "sampler: " << env_sampler << "\n";
 		vkUpdateDescriptorSets(rtg.device, uint32_t(writes.size()), writes.data(), 0, nullptr);
 		};
 
@@ -635,6 +659,113 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 	if (use_s72_scene) {
 		scene = S72::load(scene_file_);
 
+		//light helper
+		loaded_lights.clear(); //clears old runtime light data
+
+		mat4 identity = {
+			1.0f, 0.0f, 0.0f, 0.0f,
+			0.0f, 1.0f, 0.0f, 0.0f,
+			0.0f, 0.0f, 1.0f, 0.0f,
+			0.0f, 0.0f, 0.0f, 1.0f
+		}; 
+
+		for (auto const* root : scene.scene.roots) { //walk root nodes
+			collect_loaded_lights_from_node(root, identity, loaded_lights); //ollects all node-instanced lights
+			//into loaded_lights
+		}
+
+		std::cout << "loaded lights: " << loaded_lights.size() << std::endl; //prints count so
+		//we can verify A3-load is actually working
+
+		//shadow casting spot light build
+		shadow_spot_lights.clear(); //clear old runtime shadow data
+		for (auto& light : loaded_lights) { //go through all loaded lights
+			if (light.type == LoadedLight::Type::Spot && light.shadow > 0.0f) {//only if spot light with shadow value > 0
+				shadow_spot_lights.push_back(&light); //add specific light corresponding to criteration to list
+			}
+		}
+		std::cout << "shadow spot lights: " << shadow_spot_lights.size() << std::endl; //good old log of count so you can verify it works
+
+		
+		auto make_dummy_brdf_lut = [&]() {
+			if (dummy_brdf_lut_view != VK_NULL_HANDLE) return;
+
+			uint8_t pixel[4] = { 255, 255, 255, 255 };
+
+			dummy_brdf_lut = rtg.helpers.create_image(
+				VkExtent2D{ 1, 1 },
+				VK_FORMAT_R8G8B8A8_UNORM,
+				VK_IMAGE_TILING_OPTIMAL,
+				VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+				Helpers::Unmapped
+			);
+
+			rtg.helpers.transfer_to_image(pixel, sizeof(pixel), dummy_brdf_lut);
+
+			VkImageViewCreateInfo view_info{
+				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+				.image = dummy_brdf_lut.handle,
+				.viewType = VK_IMAGE_VIEW_TYPE_2D,
+				.format = VK_FORMAT_R8G8B8A8_UNORM,
+				.subresourceRange{
+					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+					.baseMipLevel = 0,
+					.levelCount = 1,
+					.baseArrayLayer = 0,
+					.layerCount = 1,
+				},
+			};
+			VK(vkCreateImageView(rtg.device, &view_info, nullptr, &dummy_brdf_lut_view));
+			};
+		// --- local fallback env cubemap  ---
+		auto make_dummy_env_cubemap = [&]() {
+			// If already made, don't remake:
+			if (env_cubemap_view != VK_NULL_HANDLE) return;
+
+			// 1x1 white per face (RGBA8)
+			std::array<std::vector<uint8_t>, 6> faces{};
+			for (int f = 0; f < 6; ++f) {
+				faces[f].assign(4, 0);
+			}
+
+			if (env_cubemap.handle != VK_NULL_HANDLE) {
+				rtg.helpers.destroy_image(std::move(env_cubemap));
+				env_cubemap = {};
+			}
+			env_cubemap = create_cubemap_image(
+				rtg,
+				VkExtent2D{ 1, 1 },
+				VK_FORMAT_R8G8B8A8_UNORM,
+				VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+				Helpers::Unmapped
+			);
+
+			VkImageViewCreateInfo view_info{
+				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+				.image = env_cubemap.handle,
+				.viewType = VK_IMAGE_VIEW_TYPE_CUBE,
+				.format = env_cubemap.format,
+				.subresourceRange{
+					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+					.baseMipLevel = 0,
+					.levelCount = 1,
+					.baseArrayLayer = 0,
+					.layerCount = 6,
+				},
+			};
+			VK(vkCreateImageView(rtg.device, &view_info, nullptr, &env_cubemap_view));
+
+
+			upload_cubemap_faces_rgba8(rtg, rtg.helpers.transfer_command_pool, env_cubemap, 1, faces);
+
+			has_env_texture = false; // dummy counts as "no real env"
+			};
+
+
+
+		//load scene 
 		std::cout << "[A1-load] scene: " << scene_file << "\n";
 		std::cout << "  nodes:      " << scene.nodes.size() << "\n";
 		std::cout << "  meshes:     " << scene.meshes.size() << "\n";
@@ -668,47 +799,26 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 		has_env_texture = (active_env && active_env->radiance);
 		env_texture = UINT32_MAX;
 
-		// --- local fallback env cubemap (must be INSIDE constructor so it can access members) ---
-		auto make_dummy_env_cubemap = [&]() {
-			// If already made, don't remake:
-			if (env_cubemap_view != VK_NULL_HANDLE) return;
-
-			// 1x1 white per face (RGBA8)
-			std::array<std::vector<uint8_t>, 6> faces{};
-			for (int f = 0; f < 6; ++f) {
-				faces[f].assign(4, 255);
-			}
-
-			env_cubemap = create_cubemap_image(
-				rtg,
-				VkExtent2D{ 1, 1 },
-				VK_FORMAT_R8G8B8A8_UNORM,
-				VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-				Helpers::Unmapped
-			);
-
-			VkImageViewCreateInfo view_info{
-				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-				.image = env_cubemap.handle,
-				.viewType = VK_IMAGE_VIEW_TYPE_CUBE,
-				.format = env_cubemap.format,
-				.subresourceRange{
-					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-					.baseMipLevel = 0,
-					.levelCount = 1,
-					.baseArrayLayer = 0,
-					.layerCount = 6,
-				},
+		{ // A2 env sampler (cube-friendly)
+			VkSamplerCreateInfo create_info{
+				.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+				.magFilter = VK_FILTER_LINEAR,
+				.minFilter = VK_FILTER_LINEAR,
+				.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+				.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+				.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+				.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+				.minLod = 0.0f,
+				.maxLod = 9.0,
+				.unnormalizedCoordinates = VK_FALSE,
 			};
-			VK(vkCreateImageView(rtg.device, &view_info, nullptr, &env_cubemap_view));
+			VK(vkCreateSampler(rtg.device, &create_info, nullptr, &env_sampler));
+			make_dummy_env_cubemap();
+			make_dummy_brdf_lut();
+		}
+		 
 
-			// NOTE: your upload function actually uses rtg.helpers.transfer_command_pool internally,
-			// so we can just pass that (or you can remove the command_pool param entirely later).
-			upload_cubemap_faces_rgba8(rtg, rtg.helpers.transfer_command_pool, env_cubemap, 1, faces);
-
-			has_env_texture = false; // dummy counts as "no real env"
-			};
+		
 
 		if (active_env && active_env->radiance) {
  
@@ -798,10 +908,14 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 				else {
 					stbi_image_free(pixels);
 
+					if (env_cubemap.handle != VK_NULL_HANDLE) {
+						rtg.helpers.destroy_image(std::move(env_cubemap));
+						env_cubemap = {};
+					}
 					env_cubemap = create_cubemap_image(
 						rtg,
 						VkExtent2D{ uint32_t(faceSize), uint32_t(faceSize) },
-						VK_FORMAT_R32G32B32A32_SFLOAT, // <-- FLOAT cubemap
+						VK_FORMAT_R32G32B32A32_SFLOAT, // 
 						VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
 						VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 						Helpers::Unmapped
@@ -847,93 +961,99 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 			stbi_uc* mip0_pixels = stbi_load(mip0_path.string().c_str(), &w0, &h0, &n0, 4);
 			if (!mip0_pixels) {
 				std::cout << "[A2] failed to load ggx mip0: " << mip0_path << "\n";
-				return; // or just skip ggx setup
+				has_env_ggx = false;
 			}
+			else {
 
 			std::array<std::vector<float>, 6> mip0_faces;
 			int faceSize0 = 0;
-			if (!split_cube_faces_vertical_strip_rgbe(mip0_pixels, w0, h0, mip0_faces, faceSize0)) {
-				std::cout << "[A2] ggx mip0 not a 6x vertical strip: " << w0 << "x" << h0 << "\n";
+			if(!split_cube_faces_vertical_strip_rgbe(mip0_pixels, w0, h0, mip0_faces, faceSize0)) {
+				std::cout << "...";
 				stbi_image_free(mip0_pixels);
-				return; // or just skip ggx setup
+				has_env_ggx = false;
 			}
-			stbi_image_free(mip0_pixels);
+			else {
+				stbi_image_free(mip0_pixels);
 
-			ggxBaseSize = uint32_t(faceSize0);
+				ggxBaseSize = uint32_t(faceSize0);
 
-			// mipLevels = floor(log2(baseSize)) + 1
-			ggxMipLevels = 1;
-			for (uint32_t t = ggxBaseSize; t > 1; t >>= 1) ggxMipLevels++;
+				// mipLevels = floor(log2(baseSize)) + 1
+				ggxMipLevels = 1;
+				for (uint32_t t = ggxBaseSize; t > 1; t >>= 1) ggxMipLevels++;
 
-			std::cout << "[A2] ggxBaseSize=" << ggxBaseSize << " ggxMipLevels=" << ggxMipLevels << "\n";
+				std::cout << "[A2] ggxBaseSize=" << ggxBaseSize << " ggxMipLevels=" << ggxMipLevels << "\n";
 
-			// ---- create cubemap with mip chain ----
-			env_ggx_cubemap = create_cubemap_image_mips(
-				rtg,
-				VkExtent2D{ ggxBaseSize, ggxBaseSize },
-				VK_FORMAT_R32G32B32A32_SFLOAT,
-				ggxMipLevels,
-				VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-				Helpers::Unmapped
-			);
+				// ---- create cubemap with mip chain ----
+				env_ggx_cubemap = create_cubemap_image_mips(
+					rtg,
+					VkExtent2D{ ggxBaseSize, ggxBaseSize },
+					VK_FORMAT_R32G32B32A32_SFLOAT,
+					ggxMipLevels,
+					VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+					VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+					Helpers::Unmapped
+				);
 
-			// view includes all mips:
-			VkImageViewCreateInfo ggx_view_info{
-				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-				.image = env_ggx_cubemap.handle,
-				.viewType = VK_IMAGE_VIEW_TYPE_CUBE,
-				.format = env_ggx_cubemap.format,
-				.subresourceRange{
-					.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-					.baseMipLevel = 0,
-					.levelCount = ggxMipLevels,
-					.baseArrayLayer = 0,
-					.layerCount = 6,
-				},
-			};
-			VK(vkCreateImageView(rtg.device, &ggx_view_info, nullptr, &env_ggx_cubemap_view));
+				// view includes all mips:
+				VkImageViewCreateInfo ggx_view_info{
+					.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+					.image = env_ggx_cubemap.handle,
+					.viewType = VK_IMAGE_VIEW_TYPE_CUBE,
+					.format = env_ggx_cubemap.format,
+					.subresourceRange{
+						.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+						.baseMipLevel = 0,
+						.levelCount = ggxMipLevels,
+						.baseArrayLayer = 0,
+						.layerCount = 6,
+					},
+				};
+				VK(vkCreateImageView(rtg.device, &ggx_view_info, nullptr, &env_ggx_cubemap_view));
 
-			// ---- upload mip0 (we already have it) ----
-			upload_cubemap_faces_float4_mip(rtg, env_ggx_cubemap, faceSize0, 0, mip0_faces);
-			has_env_ggx = true;
+				// ---- upload mip0 (we already have it) ----
+				upload_cubemap_faces_float4_mip(rtg, env_ggx_cubemap, faceSize0, 0, mip0_faces);
+				has_env_ggx = true;
 
-			// ---- load + upload mip 1..N-1 ----
-			for (uint32_t mip = 1; mip < ggxMipLevels; ++mip) {
-				uint32_t mipSize = ggxBaseSize >> mip;
-				if (mipSize < 1) mipSize = 1;
 
-				std::filesystem::path mip_path = ggx_base;
-				mip_path += "_" + std::to_string(mip) + ".png"; // ".../something.ggx_1.png"
+				// ---- load + upload mip 1..N-1 ----
+				for (uint32_t mip = 1; mip < ggxMipLevels; ++mip) {
+					uint32_t mipSize = ggxBaseSize >> mip;
+					if (mipSize < 1) mipSize = 1;
 
-				int mw = 0, mh = 0, mn = 0;
-				stbi_uc* ggx_pixels = stbi_load(mip_path.string().c_str(), &mw, &mh, &mn, 4);
-				std::cout << "ggx mip " << mip << ": " << mip_path.string() << " -> " << mw << "x" << mh << " n=" << mn << "\n";
+					std::filesystem::path mip_path = ggx_base;
+					mip_path += "_" + std::to_string(mip) + ".png"; // ".../something.ggx_1.png"
 
-				if (!ggx_pixels) {
-					std::cout << "[A2] failed to load ggx mip: " << mip_path << "\n";
-					has_env_ggx = false;
-					break;
-				}
+					int mw = 0, mh = 0, mn = 0;
+					stbi_uc* ggx_pixels = stbi_load(mip_path.string().c_str(), &mw, &mh, &mn, 4);
+					std::cout << "ggx mip " << mip << ": " << mip_path.string() << " -> " << mw << "x" << mh << " n=" << mn << "\n";
 
-				std::array<std::vector<float>, 6> ggx_faces_f;
-				int ggx_faceSize = 0;
+					if (!ggx_pixels) {
+						std::cout << "[A2] failed to load ggx mip: " << mip_path << "\n";
+						has_env_ggx = false;
+						break;
+					}
 
-				if (!split_cube_faces_vertical_strip_rgbe(ggx_pixels, mw, mh, ggx_faces_f, ggx_faceSize)) {
-					std::cout << "[A2] ggx mip not a 6x vertical strip: " << mw << "x" << mh << "\n";
+					std::array<std::vector<float>, 6> ggx_faces_f;
+					int ggx_faceSize = 0;
+
+					if (!split_cube_faces_vertical_strip_rgbe(ggx_pixels, mw, mh, ggx_faces_f, ggx_faceSize)) {
+						std::cout << "[A2] ggx mip not a 6x vertical strip: " << mw << "x" << mh << "\n";
+						stbi_image_free(ggx_pixels);
+						has_env_ggx = false;
+						break;
+					}
 					stbi_image_free(ggx_pixels);
-					has_env_ggx = false;
-					break;
-				}
-				stbi_image_free(ggx_pixels);
 
-				if (uint32_t(ggx_faceSize) != mipSize) {
-					std::cout << "[A2] ggx mip size mismatch. expected " << mipSize << " got " << ggx_faceSize << "\n";
-					has_env_ggx = false;
-					break;
-				}
+					if (uint32_t(ggx_faceSize) != mipSize) {
+						std::cout << "[A2] ggx mip size mismatch. expected " << mipSize << " got " << ggx_faceSize << "\n";
+						has_env_ggx = false;
+						break;
+					}
 
-				upload_cubemap_faces_float4_mip(rtg, env_ggx_cubemap, ggx_faceSize, mip, ggx_faces_f);
+					upload_cubemap_faces_float4_mip(rtg, env_ggx_cubemap, ggx_faceSize, mip, ggx_faces_f);
+				}
+			}
+			
 			}
 
 			// -------------------- BRDF LUT (load ONCE, not per mip) --------------------
@@ -985,27 +1105,14 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 
 		
 
-		{ // A2 env sampler (cube-friendly)
-			VkSamplerCreateInfo create_info{
-				.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-				.magFilter = VK_FILTER_LINEAR,
-				.minFilter = VK_FILTER_LINEAR,
-				.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-				.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-				.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-				.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-				.minLod = 0.0f,
-				.maxLod = 9.0,
-				.unnormalizedCoordinates = VK_FALSE,
-			};
-			VK(vkCreateSampler(rtg.device, &create_info, nullptr, &env_sampler));
-		}
+		
 
 		
 		}
 
 		if (!has_env_texture) {
 			make_dummy_env_cubemap();
+			make_dummy_brdf_lut();
 		}
 	}else{
 		// no scene; keep fallback mode
@@ -1092,14 +1199,119 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 	
 
 	 
-	//select a depth format:
-	// (at least one of these two must be supported, according to the spec; but neither are required)
+	// select a depth format:
 	depth_format = rtg.helpers.find_image_format(
 		{ VK_FORMAT_D32_SFLOAT, VK_FORMAT_X8_D24_UNORM_PACK32 },
 		VK_IMAGE_TILING_OPTIMAL,
 		VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
 	);
 
+	shadow_maps.clear();
+	shadow_map_views.clear();
+	shadow_framebuffers.clear();
+
+	shadow_maps.resize(shadow_spot_lights.size());
+	shadow_map_views.resize(shadow_spot_lights.size(), VK_NULL_HANDLE);
+	shadow_framebuffers.resize(shadow_spot_lights.size(), VK_NULL_HANDLE);
+
+	for (size_t li = 0; li < shadow_spot_lights.size(); ++li) {
+
+		uint32_t shadowMapSize = uint32_t(shadow_spot_lights[li]->shadow);
+
+		shadow_maps[li] = rtg.helpers.create_image(
+			VkExtent2D{ shadowMapSize, shadowMapSize },
+			depth_format,
+			VK_IMAGE_TILING_OPTIMAL,
+			VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			Helpers::Unmapped
+		);
+
+		VkImageViewCreateInfo shadow_view_info{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+			.image = shadow_maps[li].handle,
+			.viewType = VK_IMAGE_VIEW_TYPE_2D,
+			.format = depth_format,
+			.subresourceRange{
+				.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+				.baseMipLevel = 0,
+				.levelCount = 1,
+				.baseArrayLayer = 0,
+				.layerCount = 1,
+			},
+		};
+		VK(vkCreateImageView(rtg.device, &shadow_view_info, nullptr, &shadow_map_views[li]));
+	}
+
+	VkSamplerCreateInfo shadow_sampler_info{
+		.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+		.pNext = nullptr,
+		.flags = 0,
+		.magFilter = VK_FILTER_LINEAR,
+		.minFilter = VK_FILTER_LINEAR,
+		.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+		.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+		.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+		.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+		.mipLodBias = 0.0f,
+		.anisotropyEnable = VK_FALSE,
+		.maxAnisotropy = 1.0f,
+		.compareEnable = VK_FALSE,
+		.compareOp = VK_COMPARE_OP_ALWAYS,
+		.minLod = 0.0f,
+		.maxLod = 0.0f,
+		.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
+		.unnormalizedCoordinates = VK_FALSE,
+	};
+	VK(vkCreateSampler(rtg.device, &shadow_sampler_info, nullptr, &shadow_sampler));
+
+	{//shadow render pass
+		VkAttachmentDescription depth_attachment{
+			.format = depth_format,
+			.samples = VK_SAMPLE_COUNT_1_BIT,
+			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+			.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+		};
+
+		VkAttachmentReference depth_ref{
+			.attachment = 0,
+			.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		};
+
+		VkSubpassDescription subpass{
+			.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+			.colorAttachmentCount = 0,
+			.pDepthStencilAttachment = &depth_ref,
+		};
+
+		VkRenderPassCreateInfo create_info{
+			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+			.attachmentCount = 1,
+			.pAttachments = &depth_attachment,
+			.subpassCount = 1,
+			.pSubpasses = &subpass,
+		};
+
+		VK(vkCreateRenderPass(rtg.device, &create_info, nullptr, &shadow_render_pass));
+	}
+	for (size_t li = 0; li < shadow_map_views.size(); ++li) {
+		VkFramebufferCreateInfo fb_info{
+			.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+			.renderPass = shadow_render_pass,
+			.attachmentCount = 1,
+			.pAttachments = &shadow_map_views[li],
+			.width = shadow_maps[li].extent.width,
+			.height = shadow_maps[li].extent.height,
+			.layers = 1,
+		};
+		VK(vkCreateFramebuffer(rtg.device, &fb_info, nullptr, &shadow_framebuffers[li]));
+	}
+
+	 
 	{ //create render pass
 		//attachments:
 		std::array< VkAttachmentDescription, 2 > attachments{
@@ -1204,31 +1416,24 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 		background_pipeline.set_layout,          // env layout
 		objects_pipeline.set1_Transforms         // transforms layout
 	);
+	shadow_pipeline.create(rtg, shadow_render_pass, 0);
+
+	 
+	 
 
 	{ //create descriptor pool:
 		uint32_t per_workspace = uint32_t(rtg.workspaces.size()); //for easier-to-read counting
 
-		std::array< VkDescriptorPoolSize, 3> pool_sizes{
-			VkDescriptorPoolSize{
-				.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-				.descriptorCount = 3 * per_workspace, // lines camera + objects world + mirror camera
-			},
-			VkDescriptorPoolSize{
-				.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-				.descriptorCount = 2 * per_workspace, // objects transforms + mirror transforms
-			},
-			VkDescriptorPoolSize{
-				.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-				// mirror env (1) + objects env lambertian (1) + pbr env (3) = 5 per workspace
-				.descriptorCount = 5 * per_workspace,
-			},
+		std::array<VkDescriptorPoolSize, 3> pool_sizes{
+	VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10 * per_workspace},
+	VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 20 * per_workspace}, // merge both
+	VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 20 * per_workspace},
 		};
 
 		VkDescriptorPoolCreateInfo create_info{
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
 			.flags = 0,
-			// previous 6 sets + env lambertian (1) + env pbr (1) = 8 per workspace
-			.maxSets = 8 * per_workspace,
+			.maxSets = 30 * per_workspace, // ← move it HERE
 			.poolSizeCount = uint32_t(pool_sizes.size()),
 			.pPoolSizes = pool_sizes.data(),
 		};
@@ -1253,6 +1458,8 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 			VK(vkAllocateCommandBuffers(rtg.device, &alloc_info, &workspace.command_buffer));
 		}
 
+		 
+
 		workspace.Camera_src = rtg.helpers.create_buffer(
 			sizeof(LinesPipeline::Camera),
 			VK_BUFFER_USAGE_TRANSFER_SRC_BIT, //going to have GPU copy from this memory
@@ -1268,6 +1475,8 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, //GPU-local memory
 			Helpers::Unmapped //don't get a pointer to the memory
 		);
+
+		 
 
 		 
 
@@ -1334,9 +1543,60 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 			VK(vkAllocateDescriptorSets(rtg.device, &alloc_info, &workspace.PBR_Env_descriptors));
 		}
 
-		//descriptor write:
-		{ //point descriptor to Camera buffer + World buffer + PBR env textures:
+		
 
+		workspace.Lights = rtg.helpers.create_buffer(
+			sizeof(GPULight) * std::max<size_t>(size_t(1), loaded_lights.size()),
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			Helpers::Mapped
+		);
+
+		std::cout << "ALLOC using set4_Lights: " << pbr_pipeline.set4_Lights << std::endl;
+		{ // allocate descriptor set for Lights (set 4)
+			VkDescriptorSetAllocateInfo alloc_info{
+				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+				.descriptorPool = descriptor_pool,
+				.descriptorSetCount = 1,
+				.pSetLayouts = &pbr_pipeline.set4_Lights,
+			};
+
+			VK(vkAllocateDescriptorSets(rtg.device, &alloc_info, &workspace.Lights_descriptors));
+		}
+
+		{ // allocate descriptor set for Shadow (set 5)
+			VkDescriptorSetAllocateInfo alloc_info{
+				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+				.descriptorPool = descriptor_pool,
+				.descriptorSetCount = 1,
+				.pSetLayouts = &pbr_pipeline.set5_Shadow,
+			};
+
+			VK(vkAllocateDescriptorSets(rtg.device, &alloc_info, &workspace.Shadow_descriptors));
+		}
+
+		workspace.Shadow_descriptors_per_light.resize(shadow_spot_lights.size(), VK_NULL_HANDLE);
+
+		for (size_t li = 0; li < shadow_spot_lights.size(); ++li) {
+			VkDescriptorSetAllocateInfo shadow_alloc_info{
+				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+				.descriptorPool = descriptor_pool,
+				.descriptorSetCount = 1,
+				.pSetLayouts = &pbr_pipeline.set5_Shadow, // use the same shadow set layout you already use
+			};
+
+			VK(vkAllocateDescriptorSets(
+				rtg.device,
+				&shadow_alloc_info,
+				&workspace.Shadow_descriptors_per_light[li]
+			));
+		}
+
+		 
+		 
+
+		// descriptor write:
+		{
 			VkDescriptorBufferInfo Camera_info{
 				.buffer = workspace.Camera.handle,
 				.offset = 0,
@@ -1349,31 +1609,65 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 				.range = workspace.World.size,
 			};
 
-			// --- PBR env image infos (set3) ---
-			VkDescriptorImageInfo lam_info{
-				.sampler = env_sampler,
-				.imageView = env_lambertian_cubemap_view,
-				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			};
+			 // write Lights descriptor (set 4)
+				VkDescriptorBufferInfo lights_info{
+					.buffer = workspace.Lights.handle,
+					.offset = 0,
+					.range = VK_WHOLE_SIZE
+				};
 
-			VkDescriptorImageInfo ggx_info{
-				.sampler = env_sampler,
-				.imageView = env_ggx_cubemap_view,
-				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			};
+				VkDescriptorImageInfo shadow_info{
+	.sampler = shadow_sampler,
+	.imageView = shadow_map_views[0],
+	.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+				};
 
-			VkDescriptorImageInfo brdf_info{
-				.sampler = env_sampler,
-				.imageView = brdf_lut_view,
-				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			};
+				VkWriteDescriptorSet shadow_write{
+					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+					.dstSet = workspace.Shadow_descriptors,
+					.dstBinding = 0,
+					.dstArrayElement = 0,
+					.descriptorCount = 1,
+					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					.pImageInfo = &shadow_info,
+				};
 
-			std::array<VkWriteDescriptorSet, 5> writes{
+				for (size_t li = 0; li < shadow_spot_lights.size(); ++li) {
+					VkDescriptorImageInfo shadow_info_per_light{
+						.sampler = shadow_sampler,
+						.imageView = shadow_map_views[li],
+						.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+					};
+
+					VkWriteDescriptorSet shadow_write_per_light{
+						.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+						.dstSet = workspace.Shadow_descriptors_per_light[li],
+						.dstBinding = 0,
+						.dstArrayElement = 0,
+						.descriptorCount = 1,
+						.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+						.pImageInfo = &shadow_info_per_light,
+					};
+
+					vkUpdateDescriptorSets(rtg.device, 1, &shadow_write_per_light, 0, nullptr);
+				}
+				 
+				{
+					
+					
+					write_pbr_env_set3(workspace.PBR_Env_descriptors);
+
+				}
+
+			 
+
+
+			// --- ALWAYS write camera + world ---
+			std::array<VkWriteDescriptorSet, 2 > base_writes{
 				VkWriteDescriptorSet{
 					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 					.dstSet = workspace.Camera_descriptors,
 					.dstBinding = 0,
-					.dstArrayElement = 0,
 					.descriptorCount = 1,
 					.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
 					.pBufferInfo = &Camera_info,
@@ -1382,49 +1676,164 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 					.dstSet = workspace.World_descriptors,
 					.dstBinding = 0,
-					.dstArrayElement = 0,
 					.descriptorCount = 1,
 					.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
 					.pBufferInfo = &World_info,
-				},
-
-				// --- PBR set3 bindings ---
-				VkWriteDescriptorSet{
-					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-					.dstSet = workspace.PBR_Env_descriptors,
-					.dstBinding = 0, // ENV_LAMBERTIAN
-					.dstArrayElement = 0,
-					.descriptorCount = 1,
-					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-					.pImageInfo = &lam_info,
-				},
-				VkWriteDescriptorSet{
-					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-					.dstSet = workspace.PBR_Env_descriptors,
-					.dstBinding = 1, // ENV_GGX
-					.dstArrayElement = 0,
-					.descriptorCount = 1,
-					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-					.pImageInfo = &ggx_info,
-				},
-				VkWriteDescriptorSet{
-					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-					.dstSet = workspace.PBR_Env_descriptors,
-					.dstBinding = 2, // BRDF_LUT
-					.dstArrayElement = 0,
-					.descriptorCount = 1,
-					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-					.pImageInfo = &brdf_info,
-				},
+				}
 			};
 
-			vkUpdateDescriptorSets(
-				rtg.device,
-				uint32_t(writes.size()),
-				writes.data(),
-				0,
-				nullptr
-			);
+			VkWriteDescriptorSet write{
+					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+					.dstSet = workspace.Lights_descriptors,
+					.dstBinding = 0,
+					.descriptorCount = 1,
+					.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+					.pBufferInfo = &lights_info
+			};
+
+			
+
+		 
+
+
+			vkUpdateDescriptorSets(rtg.device, uint32_t(base_writes.size()), base_writes.data(), 0, nullptr);
+			vkUpdateDescriptorSets(rtg.device, 1, &write, 0, nullptr);
+			vkUpdateDescriptorSets(rtg.device, 1, &shadow_write, 0, nullptr);
+			 
+			{
+				// Create a temporary CPU array that matches the GPU layout
+				std::vector<GPULight> gpu_lights;
+
+				// Avoid reallocations (performance, not correctness)
+				gpu_lights.reserve(loaded_lights.size());
+
+				// Convert each scene light into GPU format
+				for (auto const& light : loaded_lights) {
+
+					GPULight gpu{};
+
+					// --- Encode light type ---
+					// Shader doesn't understand enums, so we pack it into a float
+					float type_value = 0.0f;
+					if (light.type == LoadedLight::Type::Sun) type_value = 0.0f;
+					else if (light.type == LoadedLight::Type::Sphere) type_value = 1.0f;
+					else if (light.type == LoadedLight::Type::Spot) type_value = 2.0f;
+
+					// --- Position ---
+					// xyz = world position
+					// w   = type (Sun / Sphere / Spot)
+					gpu.position = {
+						light.world_position.x,
+						light.world_position.y,
+						light.world_position.z,
+						type_value
+					};
+
+					// --- Direction ---
+					// xyz = direction (for spot/sun)
+					// w   = shadow flag (currently unused, but preserved)
+					gpu.direction = {
+	light.world_direction.x,
+	light.world_direction.y,
+	light.world_direction.z,
+	light.blend
+					};
+
+					// --- Tint (color) ---
+					// xyz = light color
+					// w   = unused (set to 1)
+					gpu.tint = {
+						light.tint.x,
+						light.tint.y,
+						light.tint.z,
+						1.0f
+					};
+
+					// --- Parameters ---
+					// x = radius
+					// y = power
+					// z = limit (falloff distance)
+					// w = unused for now
+					gpu.params = {
+						 light.radius,
+	light.power,
+	light.limit,
+	light.fov
+					};
+
+					// Store this light into the array
+					gpu_lights.emplace_back(gpu);
+				}
+
+				// --- Upload to GPU buffer ---
+				// Only copy if we actually have lights
+				if (!gpu_lights.empty()) {
+
+					// workspace.Lights is already mapped CPU-visible memory
+					// So memcpy writes directly into the buffer used by the GPU
+					std::memcpy(
+						workspace.Lights.allocation.data(),
+						gpu_lights.data(),
+						sizeof(GPULight) * gpu_lights.size()
+					);
+				}
+			}
+
+			// --- ONLY write env if valid ---
+			if (has_env_lambertian && has_env_ggx && has_brdf_lut) {
+
+				VkDescriptorImageInfo lam_info{
+					.sampler = env_sampler,
+					.imageView = env_lambertian_cubemap_view,
+					.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				};
+
+				VkDescriptorImageInfo ggx_info{
+					.sampler = env_sampler,
+					.imageView = env_ggx_cubemap_view,
+					.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				};
+
+				VkDescriptorImageInfo brdf_info{
+					.sampler = env_sampler,
+					.imageView = brdf_lut_view,
+					.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				};
+
+				std::array<VkWriteDescriptorSet, 3> env_writes{
+					VkWriteDescriptorSet{
+						.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+						.dstSet = workspace.PBR_Env_descriptors,
+						.dstBinding = 0,
+						.descriptorCount = 1,
+						.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+						.pImageInfo = &lam_info,
+					},
+					VkWriteDescriptorSet{
+						.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+						.dstSet = workspace.PBR_Env_descriptors,
+						.dstBinding = 1,
+						.descriptorCount = 1,
+						.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+						.pImageInfo = &ggx_info,
+					},
+					VkWriteDescriptorSet{
+						.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+						.dstSet = workspace.PBR_Env_descriptors,
+						.dstBinding = 2,
+						.descriptorCount = 1,
+						.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+						.pImageInfo = &brdf_info,
+					}
+				};
+
+				vkUpdateDescriptorSets(rtg.device, uint32_t(env_writes.size()), env_writes.data(), 0, nullptr);
+			}
+
+			 
+ 
+
+			 
 		}
 
 
@@ -2536,6 +2945,12 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 		}
 	}
 
+	 
+
+	 
+
+	 
+
 	{ //make a sampler for the textures
 		VkSamplerCreateInfo create_info{
 			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -2602,6 +3017,7 @@ Tutorial::Tutorial(RTG& rtg_, std::string const& scene_file_, RTG::Configuration
 
 			has_brdf_lut = true;
 			std::cout << "[A2-pbr] loaded BRDF LUT: " << lut_path << " (" << w << "x" << h << ")\n";
+			
 		}
 	}
 	
@@ -2914,6 +3330,10 @@ Tutorial::~Tutorial() {
 		env_sampler = VK_NULL_HANDLE;
 	}
 
+	if (shadow_sampler != VK_NULL_HANDLE) {
+		vkDestroySampler(rtg.device, shadow_sampler, nullptr);
+		shadow_sampler = VK_NULL_HANDLE;
+	}
 	// GGX Specular Cubemap
 	if (env_ggx_cubemap_view != VK_NULL_HANDLE) {
 		vkDestroyImageView(rtg.device, env_ggx_cubemap_view, nullptr);
@@ -3278,6 +3698,65 @@ void Tutorial::render(RTG& rtg_, RTG::RenderParams const& render_params) {
 		vkCmdCopyBuffer(workspace.command_buffer, workspace.World_src.handle, workspace.World.handle, 1, &copy_region);
 	}
 
+	/* {//upload light info
+		//upload light data to gpu
+		std::vector<GPULight> gpu_lights;
+
+		for (auto const& l : loaded_lights) {
+			GPULight g{};
+
+			g.position = { l.world_position.x, l.world_position.y, l.world_position.z, float(l.type) };
+
+			g.direction = { l.world_direction.x, l.world_direction.y, l.world_direction.z, 0.0f };
+
+			g.tint = { l.tint.x, l.tint.y, l.tint.z, l.shadow };
+
+			g.params = { l.radius, l.power, l.limit, l.fov };
+
+			gpu_lights.push_back(g);
+		}
+
+		std::cout << "uploading lights count: " << loaded_lights.size() << std::endl;
+		std::cout << "sizeof(GPULight): " << sizeof(GPULight) << std::endl;
+		memcpy(
+			(void*)workspace.Lights.allocation.data(),
+			(const void*)gpu_lights.data(),
+			gpu_lights.size() * sizeof(GPULight)
+		);
+	
+	}*/
+
+	if (workspace.Lights.handle != VK_NULL_HANDLE) {
+		//upload light info
+		std::vector<GPULight> gpu_lights;
+
+		for (auto const& l : loaded_lights) {
+			GPULight g{};
+
+			//g.position = { l.world_position.x, l.world_position.y, l.world_position.z, float(l.type) };
+			float type_value = 0.0f;
+			if (l.type == LoadedLight::Type::Sun) type_value = 0.0f;
+			else if (l.type == LoadedLight::Type::Sphere) type_value = 1.0f;
+			else if (l.type == LoadedLight::Type::Spot) type_value = 2.0f;
+
+			g.position = { l.world_position.x, l.world_position.y, l.world_position.z, type_value };
+			g.direction = { l.world_direction.x, l.world_direction.y, l.world_direction.z, l.blend };
+			g.tint = { l.tint.x, l.tint.y, l.tint.z, l.shadow };
+			g.params = { l.radius, l.power, l.limit, l.fov };
+
+			gpu_lights.push_back(g);
+		}
+
+		//std::cout << "uploading lights count: " << loaded_lights.size() << std::endl;
+		//std::cout << "sizeof(GPULight): " << sizeof(GPULight) << std::endl;
+
+		memcpy(
+			(void*)workspace.Lights.allocation.data(),
+			(const void*)gpu_lights.data(),
+			gpu_lights.size() * sizeof(GPULight)
+		);
+	}
+
 
 	if (!object_instances.empty()) { //upload object transforms:
 		size_t needed_bytes = object_instances.size() * sizeof(ObjectsPipeline::Transform);
@@ -3384,7 +3863,113 @@ void Tutorial::render(RTG& rtg_, RTG::RenderParams const& render_params) {
 		);
 	}
 
+	 
+
 	//GPU commands here:
+
+ 
+	for (size_t li = 0; li < shadow_spot_lights.size(); ++li) {
+
+		auto m = make_spot_light_matrix(*shadow_spot_lights[li]);
+
+		/*std::cout << "LIGHT MATRIX:\n";
+		for (int k = 0; k < 16; k++) {
+			std::cout << m[k] << " ";
+			if ((k % 4) == 3) std::cout << "\n";
+		}*/
+
+		VkClearValue clear{};
+		clear.depthStencil = { 1.0f, 0 };
+
+		VkRenderPassBeginInfo begin_info{
+			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+			.renderPass = shadow_render_pass,
+			.framebuffer = shadow_framebuffers[li],
+			.renderArea{
+				.offset = {0, 0},
+				.extent = shadow_maps[li].extent,
+			},
+			.clearValueCount = 1,
+			.pClearValues = &clear,
+		};
+
+		vkCmdBeginRenderPass(workspace.command_buffer, &begin_info, VK_SUBPASS_CONTENTS_INLINE);
+
+		vkCmdBindPipeline(
+			workspace.command_buffer,
+			VK_PIPELINE_BIND_POINT_GRAPHICS,
+			shadow_pipeline.handle
+		);
+
+		vkCmdSetDepthBias(workspace.command_buffer, 0.0f, 0.0f, 0.0f);
+		 
+
+		VkViewport vp{
+	0.0f,
+	0.0f,
+	float(shadow_maps[li].extent.width),
+	float(shadow_maps[li].extent.height),
+	0.0f,
+	1.0f
+		};
+
+		VkRect2D sc{
+			{0, 0},
+			shadow_maps[li].extent
+		};
+
+		vkCmdSetViewport(workspace.command_buffer, 0, 1, &vp);
+		vkCmdSetScissor(workspace.command_buffer, 0, 1, &sc);
+
+		VkBuffer vb = object_vertices.handle;
+		VkDeviceSize off = 0;
+		vkCmdBindVertexBuffers(workspace.command_buffer, 0, 1, &vb, &off);
+
+		vkCmdBindDescriptorSets(
+			workspace.command_buffer,
+			VK_PIPELINE_BIND_POINT_GRAPHICS,
+			shadow_pipeline.layout,
+			0,
+			1,
+			&workspace.Transforms_descriptors,
+			0,
+			nullptr
+		);
+
+		std::cout << "shadow draw count: " << object_instances.size() << "\n";
+
+		if (!object_instances.empty()) {
+			std::cout << "first shadow verts: "
+				<< object_instances[0].vertices.first << " "
+				<< object_instances[0].vertices.count << "\n";
+		}
+
+		for (uint32_t i = 0; i < object_instances.size(); ++i) {
+			auto const& inst = object_instances[i];
+			Tutorial::ShadowPush push{};
+			push.LIGHT_CLIP_FROM_WORLD = m;
+			push.OBJECT_INDEX = int32_t(i);
+
+			vkCmdPushConstants(
+				workspace.command_buffer,
+				shadow_pipeline.layout,
+				VK_SHADER_STAGE_VERTEX_BIT,
+				0,
+				sizeof(Tutorial::ShadowPush),
+				&push
+			);
+			vkCmdDraw(
+				workspace.command_buffer,
+				inst.vertices.count,
+				1,
+				inst.vertices.first,
+				i
+			);
+		}
+
+		vkCmdEndRenderPass(workspace.command_buffer);
+	}
+	
 	{//render pass
 		std::array< VkClearValue, 2 > clear_values{
 			VkClearValue{.color{.float32{1.0f, 0.85f, 0.90f, 1.0f}
@@ -3402,10 +3987,13 @@ void Tutorial::render(RTG& rtg_, RTG::RenderParams const& render_params) {
 			 },
 
 			.clearValueCount = uint32_t(clear_values.size()),
-			.pClearValues = clear_values.data(),
+.pClearValues = clear_values.data(),
 		};
 
+		
 		vkCmdBeginRenderPass(workspace.command_buffer, &begin_info, VK_SUBPASS_CONTENTS_INLINE);
+		vkCmdSetViewport(workspace.command_buffer, 0, 1, &draw_viewport);
+		vkCmdSetScissor(workspace.command_buffer, 0, 1, &draw_scissor);
 
 		//  run pipelines here:
  
@@ -3515,7 +4103,8 @@ void Tutorial::render(RTG& rtg_, RTG::RenderParams const& render_params) {
 			if (!mirror_instance_indices.empty()) {
 
 				vkCmdBindPipeline(workspace.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mirror_pipeline.handle);
-
+				vkCmdSetViewport(workspace.command_buffer, 0, 1, &draw_viewport);
+				vkCmdSetScissor(workspace.command_buffer, 0, 1, &draw_scissor);
 				// bind packed vertex buffer
 				VkBuffer vb = object_vertices.handle;
 				VkDeviceSize off = 0;
@@ -3539,6 +4128,7 @@ void Tutorial::render(RTG& rtg_, RTG::RenderParams const& render_params) {
 						0,
 						nullptr
 					);
+					 
 				}
 
 				// push constants (once per pass is fine — camera is same)
@@ -3581,79 +4171,145 @@ void Tutorial::render(RTG& rtg_, RTG::RenderParams const& render_params) {
 
 		//objects pass
 		{ // --- OBJECTS PASS ---
-			if (!object_instances.empty()) {
-				// 1. Bind Common Vertex Buffer
-				VkBuffer vb = object_vertices.handle;
-				VkDeviceSize off = 0;
-				vkCmdBindVertexBuffers(workspace.command_buffer, 0, 1, &vb, &off);
+			 
+				if (!object_instances.empty()) {
+					 
+					for (size_t li = 0; li < shadow_spot_lights.size(); ++li) {
+						mat4 m = make_spot_light_matrix(*shadow_spot_lights[li]);
+						VkBuffer vb = object_vertices.handle;
+						VkDeviceSize off = 0;
+						vkCmdBindVertexBuffers(workspace.command_buffer, 0, 1, &vb, &off);
 
-				// --- PASS A: LAMBERTIAN (WOOD WITHOUT SHINE) ---
-				vkCmdBindPipeline(workspace.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, objects_pipeline.handle);
+						vkCmdBindPipeline(workspace.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, objects_pipeline.handle);
+						vkCmdSetViewport(workspace.command_buffer, 0, 1, &draw_viewport);
+						vkCmdSetScissor(workspace.command_buffer, 0, 1, &draw_scissor);
 
-				// Bind Lambertian Sets (0: World, 1: Transforms, 3: Irradiance)
-				VkDescriptorSet lambert_sets[] = {
-					workspace.World_descriptors,
-					workspace.Transforms_descriptors,
-					env_lambertian_descriptors
-				};
-				vkCmdBindDescriptorSets(workspace.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, objects_pipeline.layout, 0, 2, &lambert_sets[0], 0, nullptr);
-				vkCmdBindDescriptorSets(workspace.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, objects_pipeline.layout, 3, 1, &lambert_sets[2], 0, nullptr);
+						for (uint32_t i = 0; i < object_instances.size(); ++i) {
+							ObjectInstance const& inst = object_instances[i];
 
-				for (uint32_t i = 0; i < object_instances.size(); ++i) {
-					ObjectInstance const& inst = object_instances[i];
+							// skip non-lambert objects
+							if (inst.material && (std::holds_alternative<S72::Material::PBR>(inst.material->brdf) ||
+								std::holds_alternative<S72::Material::Mirror>(inst.material->brdf))) {
+								continue;
+							}
 
-					// Skip PBR/Mirror objects in this pass
-					if (inst.material && (std::holds_alternative<S72::Material::PBR>(inst.material->brdf) ||
-						std::holds_alternative<S72::Material::Mirror>(inst.material->brdf))) continue;
+							uint32_t set2_idx = inst.texture;
+							if (use_s72_scene && inst.material) {
+								auto it = material_name_to_set2.find(inst.material->name);
+								if (it != material_name_to_set2.end()) set2_idx = it->second;
+							}
 
-					// Bind Material (Set 2)
-					uint32_t set2_idx = inst.texture;
-					if (use_s72_scene && inst.material) {
-						auto it = material_name_to_set2.find(inst.material->name);
-						if (it != material_name_to_set2.end()) set2_idx = it->second;
+							std::array<VkDescriptorSet, 6> sets = {
+								workspace.World_descriptors,                  // set 0
+								workspace.Transforms_descriptors,             // set 1
+								material_descriptors_lam[set2_idx],           // set 2
+								env_lambertian_descriptors,                   // set 3
+								workspace.Lights_descriptors,                 // set 4
+								workspace.Shadow_descriptors_per_light[li]    // set 5
+							};
+
+							vkCmdBindDescriptorSets(
+								workspace.command_buffer,
+								VK_PIPELINE_BIND_POINT_GRAPHICS,
+								objects_pipeline.layout,
+								0,
+								uint32_t(sets.size()),
+								sets.data(),
+								0,
+								nullptr
+							);
+
+							ObjectsPipeline::Push push{};
+						 
+							 
+
+							 
+							push.LIGHT_CLIP_FROM_WORLD = m;
+							push.SHADOW_LIGHT_INDEX = int32_t(li);
+
+							vkCmdPushConstants(
+								workspace.command_buffer,
+								objects_pipeline.layout,
+								VK_SHADER_STAGE_FRAGMENT_BIT,
+								0,
+								sizeof(push),
+								&push
+							);
+
+							vkCmdDraw(workspace.command_buffer, inst.vertices.count, 1, inst.vertices.first, i);
+						}
+					
+						//if (false) {
+						// --- Inside Tutorial::render ---
+						{ // --- PASS B: PBR   ---
+							vkCmdBindPipeline(workspace.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pbr_pipeline.handle);
+							vkCmdSetViewport(workspace.command_buffer, 0, 1, &draw_viewport);
+							vkCmdSetScissor(workspace.command_buffer, 0, 1, &draw_scissor);
+							// Bind PBR Global Sets (0: World, 1: Transforms, 3: PBR Env)
+							VkDescriptorSet pbr_globals[] = {
+			workspace.World_descriptors,
+			workspace.Transforms_descriptors,
+			workspace.PBR_Env_descriptors
+							};
+
+							
+
+							// 1. CALCULATE VIEW INVERSE ONCE PER PASS
+							mat4 view_to_world = mat4_inverse_rigid(this->VIEW_FROM_WORLD);
+							S72::vec3 cam_pos{ view_to_world[12], view_to_world[13], view_to_world[14] };
+
+							for (uint32_t idx : pbr_instance_indices) { // Use the NEW specialized list
+								ObjectInstance const& inst = object_instances[idx];
+								std::array<VkDescriptorSet, 6> sets = {
+   workspace.World_descriptors,                  // set 0
+   workspace.Transforms_descriptors,             // set 1
+   material_descriptors_pbr[inst.texture],       // set 2
+   workspace.PBR_Env_descriptors,                // set 3
+   workspace.Lights_descriptors,                 // set 4
+   workspace.Shadow_descriptors_per_light[li]    // set 5
+								};
+
+								vkCmdBindDescriptorSets(
+									workspace.command_buffer,
+									VK_PIPELINE_BIND_POINT_GRAPHICS,
+									pbr_pipeline.layout,
+									0,
+									uint32_t(sets.size()),
+									sets.data(),
+									0,
+									nullptr
+								);
+								 
+
+								PBRPipeline::Push push{};
+								push.CLIP_FROM_LOCAL = inst.transform.CLIP_FROM_LOCAL;
+								push.WORLD_FROM_LOCAL = inst.transform.WORLD_FROM_LOCAL;
+								//push.LIGHT_CLIP_FROM_WORLD = inst.transform.LIGHT_CLIP_FROM_WORLD;
+								if (!shadow_spot_lights.empty()) {
+									push.LIGHT_CLIP_FROM_WORLD = m;
+								}
+								else {
+									push.LIGHT_CLIP_FROM_WORLD = mat4{
+			1.0f, 0.0f, 0.0f, 0.0f,
+			0.0f, 1.0f, 0.0f, 0.0f,
+			0.0f, 0.0f, 1.0f, 0.0f,
+			0.0f, 0.0f, 0.0f, 1.0f
+									};
+								}
+
+								push.camera_ws = cam_pos;
+								push.exposure = rtg.configuration.exposure;
+								push.tone_op = (rtg.configuration.tone_map == "reinhard") ? 1 : 0;
+								push.SHADOW_LIGHT_INDEX = int32_t(li);
+								vkCmdPushConstants(workspace.command_buffer, pbr_pipeline.layout,
+									VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+									0, sizeof(push), &push);
+
+								vkCmdDraw(workspace.command_buffer, inst.vertices.count, 1, inst.vertices.first, idx);
+							}
+						}
+						//}
 					}
-					vkCmdBindDescriptorSets(workspace.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, objects_pipeline.layout, 2, 1, &material_descriptors_lam[set2_idx], 0, nullptr);
-
-					vkCmdDraw(workspace.command_buffer, inst.vertices.count, 1, inst.vertices.first, i);
-				}
-
-				// --- Inside Tutorial::render ---
-				{ // --- PASS B: PBR (THE FANCY WOOD) ---
-					vkCmdBindPipeline(workspace.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pbr_pipeline.handle);
-
-					// Bind PBR Global Sets (0: World, 1: Transforms, 3: PBR Env)
-					VkDescriptorSet pbr_globals[] = {
-						workspace.World_descriptors,
-						workspace.Transforms_descriptors,
-						env_pbr_descriptors
-					};
-					vkCmdBindDescriptorSets(workspace.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pbr_pipeline.layout, 0, 2, &pbr_globals[0], 0, nullptr);
-					vkCmdBindDescriptorSets(workspace.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pbr_pipeline.layout, 3, 1, &pbr_globals[2], 0, nullptr);
-
-					// 1. CALCULATE VIEW INVERSE ONCE PER PASS
-					mat4 view_to_world = mat4_inverse_rigid(this->VIEW_FROM_WORLD);
-					S72::vec3 cam_pos{ view_to_world[12], view_to_world[13], view_to_world[14] };
-
-					for (uint32_t idx : pbr_instance_indices) { // Use the NEW specialized list
-						ObjectInstance const& inst = object_instances[idx];
-
-						// Bind Material Textures (Set 2)
-						vkCmdBindDescriptorSets(workspace.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pbr_pipeline.layout, 2, 1, &material_descriptors_pbr[inst.texture], 0, nullptr);
-
-						PBRPipeline::Push push{};
-						push.CLIP_FROM_LOCAL = inst.transform.CLIP_FROM_LOCAL;
-						push.WORLD_FROM_LOCAL = inst.transform.WORLD_FROM_LOCAL;
-						push.camera_ws = cam_pos;
-						push.exposure = rtg.configuration.exposure;
-						push.tone_op = (rtg.configuration.tone_map == "reinhard") ? 1 : 0;
-
-						vkCmdPushConstants(workspace.command_buffer, pbr_pipeline.layout,
-							VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-							0, sizeof(push), &push);
-
-						vkCmdDraw(workspace.command_buffer, inst.vertices.count, 1, inst.vertices.first, idx);
-					}
-				}
 			}
 		}
 
@@ -3983,6 +4639,8 @@ static bool aabb_is_culled_in_clip( //https://ktstephano.github.io/rendering/str
 	return false; // not fully outside any plane -> keep
 }
 
+
+
 static void add_aabb_lines( //heavily based on https://ktstephano.github.io/rendering/stratusgfx/aabbs
 	std::vector<PosColVertex>& out,
 	mat4 const& WORLD_FROM_LOCAL,
@@ -4199,6 +4857,13 @@ void Tutorial::update(float dt) {
 			anim_time += dt;         // advance after first frame
 		}
 		apply_drivers(scene, anim_time);
+
+		loaded_lights.clear();
+
+		mat4 identity = mat4_identity();
+		for (auto const* root : scene.scene.roots) {
+			collect_loaded_lights_from_node(root, identity, loaded_lights);
+		}
 	}
 
 	auto local_from_node = [&](S72::Node const& n) -> mat4 {

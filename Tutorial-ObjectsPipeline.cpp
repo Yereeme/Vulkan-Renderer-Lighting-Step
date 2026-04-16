@@ -112,24 +112,65 @@ void Tutorial::ObjectsPipeline::create(RTG& rtg, VkRenderPass render_pass, uint3
 		VK(vkCreateDescriptorSetLayout(rtg.device, &create_info, nullptr, &set3_EnvLambertian));
 	}
 
+	{ // set4_Lights
+		VkDescriptorSetLayoutBinding lights_binding{};
+		lights_binding.binding = 0;
+		lights_binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		lights_binding.descriptorCount = 1;
+		lights_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		lights_binding.pImmutableSamplers = nullptr;
+
+		VkDescriptorSetLayoutCreateInfo create_info{};
+		create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		create_info.bindingCount = 1;
+		create_info.pBindings = &lights_binding;
+
+		VK(vkCreateDescriptorSetLayout(rtg.device, &create_info, nullptr, &set4_Lights));
+	}
+
+	{//set5_Shadow
+		VkDescriptorSetLayoutBinding shadow_binding{};
+		shadow_binding.binding = 0;
+		shadow_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		shadow_binding.descriptorCount = 1;
+		shadow_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		shadow_binding.pImmutableSamplers = nullptr;
+
+		VkDescriptorSetLayoutCreateInfo shadow_info{};
+		shadow_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		shadow_info.bindingCount = 1;
+		shadow_info.pBindings = &shadow_binding;
+
+		VK(vkCreateDescriptorSetLayout(rtg.device, &shadow_info, nullptr, &set5_Shadow));
+
+	}
+
+
+
 	{//create pipeline layout:
-		std::array< VkDescriptorSetLayout, 4 > layouts{
-			//set0_Camera,
-			set0_World,
-			set1_Transforms, //we'd like to say "VK_NULL_HANDLE" here, but that's not valid without 
-			//an extension
-			 
-			set2_TEXTURE,
-			set3_EnvLambertian
+		std::array< VkDescriptorSetLayout, 6 > layouts{
+	set0_World,
+	set1_Transforms,
+	set2_TEXTURE,
+	set3_EnvLambertian,
+	set4_Lights,
+	set5_Shadow
 		};
+
+		VkPushConstantRange push_constant_range{
+	.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+	.offset = 0,
+	.size = sizeof(Tutorial::ObjectsPipeline::Push),
+		};
+		
 		
 
 		VkPipelineLayoutCreateInfo create_info{
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 			.setLayoutCount = uint32_t(layouts.size()),
 			.pSetLayouts = layouts.data(),
-			.pushConstantRangeCount = 0,
-			.pPushConstantRanges = nullptr,
+			.pushConstantRangeCount = 1,
+			.pPushConstantRanges = &push_constant_range,
 		};
 
 		VK(vkCreatePipelineLayout(rtg.device, &create_info, nullptr, &layout));
@@ -142,10 +183,12 @@ void Tutorial::ObjectsPipeline::create(RTG& rtg, VkRenderPass render_pass, uint3
 		//there will be one color attachment with blending disabled
 		std::array<VkPipelineColorBlendAttachmentState, 1> attachment_states{
 			VkPipelineColorBlendAttachmentState{
-				.blendEnable = VK_FALSE,
-				.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-				VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-			},
+	.blendEnable = VK_FALSE,
+	.colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
+					  VK_COLOR_COMPONENT_G_BIT |
+					  VK_COLOR_COMPONENT_B_BIT |
+					  VK_COLOR_COMPONENT_A_BIT,
+},
 		};
 		VkPipelineColorBlendStateCreateInfo color_blend_state{
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -291,6 +334,16 @@ void Tutorial::ObjectsPipeline::destroy(RTG& rtg) {
 	if (set3_EnvLambertian != VK_NULL_HANDLE) {
 		vkDestroyDescriptorSetLayout(rtg.device, set3_EnvLambertian, nullptr);
 		set3_EnvLambertian = VK_NULL_HANDLE;
+	}
+
+	if (set4_Lights != VK_NULL_HANDLE) {
+		vkDestroyDescriptorSetLayout(rtg.device, set4_Lights, nullptr);
+		set4_Lights = VK_NULL_HANDLE;
+	}
+
+	if (set5_Shadow != VK_NULL_HANDLE) {
+		vkDestroyDescriptorSetLayout(rtg.device, set5_Shadow, nullptr);
+		set5_Shadow = VK_NULL_HANDLE;
 	}
 
 	if (layout != VK_NULL_HANDLE) {

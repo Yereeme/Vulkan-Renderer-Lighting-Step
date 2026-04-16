@@ -39,6 +39,7 @@ const main_objs = [
 	maek.CPP('main.cpp'),
 	maek.CPP('external/s72/S72.cpp'),
 	maek.CPP('external/s72/sejp.cpp'),
+	maek.CPP('LightHelpers.cpp'),
 
 ];
 
@@ -68,10 +69,16 @@ const objects_shaders = [
 ];
 main_objs.push(maek.CPP('Tutorial-ObjectsPipeline.cpp', undefined, { depends: [...objects_shaders] }));
 
+const shadows_shaders = [
+	 
+	maek.GLSLC('shadow.vert'),
+];
+main_objs.push(maek.CPP('ShadowPipeline.cpp', undefined, { depends: [...shadows_shaders] }));
+
 
 //build pbr shaders and pipeline
 const pbr_shaders = [
-	maek.GLSLC('pbr.vert'),  // needed because PBRPipeline.cpp includes spv/objects.vert.inl
+	maek.GLSLC('pbr.vert'),   
 	maek.GLSLC('pbr.frag'),     
 ];
 main_objs.push(maek.CPP('PBRPipeline.cpp', undefined, { depends: [...pbr_shaders] }));
