@@ -1,7 +1,7 @@
 #version 450
 #include "tone_map.glsl"
 
-layout(location = 0) in vec3 inPosition; 
+layout(location = 0) in vec3 inWorldPos; 
 layout(location = 1) in vec2 texCoord; 
 layout(location = 2) in mat3 inTBN;      
 
@@ -91,8 +91,8 @@ float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
 
 
 // Returns 1.0 when lit, 0.0 when shadowed.
-// This is a basic hard-shadow test.
-// Later you can turn this into PCF by averaging multiple nearby samples.
+ 
+ // Uses a 4-tap PCF kernel for softer shadow edges.
 mat4 make_spot_light_matrix(GPULight light) {
     vec3 F = normalize(light.direction.xyz);
     vec3 up = vec3(0.0, 1.0, 0.0);
@@ -139,18 +139,33 @@ float sample_shadow(vec3 worldPos, vec3 N, vec3 lightDir, mat4 light_clip_from_w
         return 1.0;
     }
 
-    float closestDepth = texture(SHADOW_MAPS[shadowSlot], shadowUV).r;
+    
 
     float bias = max(0.0005, 0.002 * (1.0 - max(dot(N, lightDir), 0.0)));
 
-    return (currentDepth - bias > closestDepth) ? 0.0 : 1.0;
+    vec2 texelSize = 1.0 / vec2(textureSize(SHADOW_MAPS[shadowSlot], 0));
+    vec2 pcfOffsets[4] = vec2[](
+        vec2(-0.5, -0.5),
+        vec2( 0.5, -0.5),
+        vec2(-0.5,  0.5),
+        vec2( 0.5,  0.5)
+    );
+
+    float lit = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        float closestDepth = texture(SHADOW_MAPS[shadowSlot], shadowUV + pcfOffsets[i] * texelSize).r;
+        lit += (currentDepth - bias > closestDepth) ? 0.0 : 1.0;
+    }
+
+    return lit * 0.25;
 }
 
 void main() {
  
-    // 1. RE-NORMALIZE VECTORS 
-   vec3 worldPos = (pc.WORLD_FROM_LOCAL * vec4(inPosition, 1.0)).xyz;
-vec3 V = normalize(pc.camera_ws - worldPos);
+    // 1. RE-NORMALIZE VECTORS
+   
+    vec3 worldPos = inWorldPos;
+    vec3 V = normalize(pc.camera_ws - worldPos);
     vec3 Ngeom = normalize(inTBN[2]);
     
     // 2. NORMAL MAPPING

@@ -188,6 +188,8 @@ void main() {
 
 vec3 directLights = vec3(0.0);
 
+vec3 lambertBRDF = albedo * (1.0 / PI);
+
 int shadowSlot = 0;
 
 for (int i = 0; i < lights.length(); ++i) {
@@ -200,7 +202,7 @@ for (int i = 0; i < lights.length(); ++i) {
         if (NdotLsun <= 0.0) continue;
 
         float sunStrength = lights[i].params.y;
-        directLights += albedo * lights[i].tint.rgb * sunStrength * NdotLsun;
+        directLights += lambertBRDF * lights[i].tint.rgb * sunStrength * NdotLsun;
         continue;
     }
 
@@ -255,9 +257,10 @@ for (int i = 0; i < lights.length(); ++i) {
             shadow = sample_shadow(position, N_ws, L, light_clip_from_world, myShadowSlot);
         }
 
-        directLights += shadow * albedo * lights[i].tint.rgb * power * NdotL * attenuation * spotFactor;
+        directLights += shadow * lambertBRDF * lights[i].tint.rgb * power * NdotL * attenuation * spotFactor;
     }
 }
 
- outColor = vec4(0.08 * albedo + directLights, 1.0);
+ outColor = vec4(diffuseIBL + directLights, 1.0);
 }
+ 
