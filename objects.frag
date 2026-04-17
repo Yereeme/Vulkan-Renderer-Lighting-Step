@@ -223,9 +223,13 @@ for (int i = 0; i < lights.length(); ++i) {
             vec3 LtoSurface = -L;
 
             float cosTheta = dot(lightDir, LtoSurface);
-            float cosOuter = cos(lights[i].params.w);
-            float blend = lights[i].direction.w;
-            float cosInner = mix(cosOuter, 1.0, 1.0 - blend);
+           // params.w stores the full spotlight FOV angle.
+            // Cone tests should use the half-angle from center to edge.
+            float cosOuter = cos(lights[i].params.w * 0.5);
+            // direction.w controls penumbra blend [0,1]:
+            // 0.0 = hard edge (inner == outer), 1.0 = widest soft edge.
+            float blend = clamp(lights[i].direction.w, 0.0, 1.0);
+            float cosInner = mix(cosOuter, 1.0, blend);
 
             spotFactor = clamp(
                 (cosTheta - cosOuter) / max(cosInner - cosOuter, 0.0001),
