@@ -107,7 +107,14 @@ mat4 make_spot_light_matrix(GPULight light) {
     return proj * view;
 }
 
-float sample_shadow(vec3 worldPos, vec3 N, vec3 lightDir, mat4 light_clip_from_world, int shadowSlot)
+float sample_shadow(
+    vec3 worldPos,
+    vec3 N,
+    vec3 lightDir,
+    mat4 light_clip_from_world,
+    int shadowSlot,
+    float lightRadius
+)
 {
      
      vec4 lightClip = light_clip_from_world * vec4(worldPos, 1.0);
@@ -126,18 +133,49 @@ float sample_shadow(vec3 worldPos, vec3 N, vec3 lightDir, mat4 light_clip_from_w
 
     float bias = max(0.0005, 0.002 * (1.0 - max(dot(N, lightDir), 0.0)));
 
-    vec2 texel = 1.0 / vec2(textureSize(SHADOW_MAPS[shadowSlot], 0));
-    float sum = 0.0;
+    float receiverDepth = currentDepth - bias;
+    vec2 texelSize = 1.0 / vec2(textureSize(SHADOW_MAPS[shadowSlot], 0));
 
-    for (int x = 0; x < 2; ++x) {
-        for (int y = 0; y < 2; ++y) {
-            vec2 offset = vec2(x - 0.5, y - 0.5) * texel;
-            float closestDepth = texture(SHADOW_MAPS[shadowSlot], shadowUV + offset).r;
-            sum += (currentDepth - bias > closestDepth) ? 0.0 : 1.0;
+    const int POISSON_COUNT = 16;
+    vec2 poisson[POISSON_COUNT] = vec2[](
+        vec2(-0.94201624, -0.39906216), vec2(0.94558609, -0.76890725),
+        vec2(-0.09418410, -0.92938870), vec2(0.34495938,  0.29387760),
+        vec2(-0.91588581,  0.45771432), vec2(-0.81544232, -0.87912464),
+        vec2(-0.38277543,  0.27676845), vec2(0.97484398,  0.75648379),
+        vec2(0.44323325, -0.97511554), vec2(0.53742981, -0.47373420),
+        vec2(-0.26496911, -0.41893023), vec2(0.79197514,  0.19090188),
+        vec2(-0.24188840,  0.99706507), vec2(-0.81409955,  0.91437590),
+        vec2(0.19984126,  0.78641367), vec2(0.14383161, -0.14100790)
+    );
+
+   // 1) blocker search
+    float searchRadiusTexels = (2.0 + 24.0 * clamp(lightRadius, 0.0, 1.0)) * clamp(receiverDepth, 0.0, 1.0);
+    vec2 searchRadiusUV = texelSize * searchRadiusTexels;
+    float blockerSum = 0.0;
+    float blockerCount = 0.0;
+    for (int i = 0; i < POISSON_COUNT; ++i) {
+        float sampleDepth = texture(SHADOW_MAPS[shadowSlot], shadowUV + poisson[i] * searchRadiusUV).r;
+        if (sampleDepth < receiverDepth) {
+            blockerSum += sampleDepth;
+            blockerCount += 1.0;
         }
     }
 
-    return sum * 0.25;
+   if (blockerCount < 0.5) return 1.0;
+    float avgBlockerDepth = blockerSum / blockerCount;
+
+    // 2) penumbra estimate
+    float penumbra = max(receiverDepth - avgBlockerDepth, 0.0) / max(avgBlockerDepth, 0.001);
+    float filterRadiusTexels = clamp(penumbra * (4.0 + 60.0 * lightRadius), 1.0, 30.0);
+    vec2 filterRadiusUV = texelSize * filterRadiusTexels;
+
+    // 3) variable-radius PCF
+    float lit = 0.0;
+    for (int i = 0; i < POISSON_COUNT; ++i) {
+        float closestDepth = texture(SHADOW_MAPS[shadowSlot], shadowUV + poisson[i] * filterRadiusUV).r;
+        lit += (receiverDepth > closestDepth) ? 0.0 : 1.0;
+    }
+    return lit / float(POISSON_COUNT);  
 }
 void main() {
 
@@ -258,7 +296,7 @@ for (int i = 0; i < lights.length(); ++i) {
        float shadow = 1.0;
         if (myShadowSlot >= 0) {
             mat4 light_clip_from_world = make_spot_light_matrix(lights[i]);
-            shadow = sample_shadow(position, N_ws, L, light_clip_from_world, myShadowSlot);
+             shadow = sample_shadow(position, N_ws, L, light_clip_from_world, myShadowSlot, lights[i].params.x);
         }
 
         directLights += shadow * lambertBRDF * lights[i].tint.rgb * power * NdotL * attenuation * spotFactor;
