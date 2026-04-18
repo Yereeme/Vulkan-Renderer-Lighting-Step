@@ -59,6 +59,15 @@ layout(location = 0) out vec4 outColor;
 
 const float PI = 3.14159265359;
 
+const float SHADOW_NEAR_PLANE = 0.1;
+const float SHADOW_FAR_PLANE = 100.0;
+const float SHADOW_A = -0.5 - 0.5 * (SHADOW_FAR_PLANE + SHADOW_NEAR_PLANE) / (SHADOW_FAR_PLANE - SHADOW_NEAR_PLANE);
+const float SHADOW_B = -(SHADOW_FAR_PLANE * SHADOW_NEAR_PLANE) / (SHADOW_FAR_PLANE - SHADOW_NEAR_PLANE);
+
+float linearize_shadow_depth(float depth01) {
+    return 1.0 / max(SHADOW_A - depth01 * SHADOW_B, 0.0001);
+}
+
 // --- MATH HELPERS ---
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
@@ -130,7 +139,8 @@ float sample_shadow(
     vec3 lightDir,
     mat4 light_clip_from_world,
     int shadowSlot,
-    float lightRadius
+    float lightRadius,
+    float lightFov
 )
 {
     vec4 lightClip = light_clip_from_world * vec4(worldPos, 1.0);
@@ -155,6 +165,8 @@ float sample_shadow(
     vec2 texelSize = 1.0 / vec2(textureSize(SHADOW_MAPS[shadowSlot], 0));
 
     //16-sample Poisson disk.
+   float zReceiver = linearize_shadow_depth(receiverDepth);
+
     const int POISSON_COUNT = 16;
     vec2 poisson[POISSON_COUNT] = vec2[](
         vec2(-0.94201624, -0.39906216), vec2(0.94558609, -0.76890725),
@@ -167,9 +179,11 @@ float sample_shadow(
         vec2(0.19984126,  0.78641367), vec2(0.14383161, -0.14100790)
     );
 
-    // 1) Blocker search: estimate mean occluder depth around receiver.
-    float searchRadiusTexels = (2.0 + 24.0 * clamp(lightRadius, 0.0, 1.0)) * clamp(receiverDepth, 0.0, 1.0);
-    vec2 searchRadiusUV = texelSize * searchRadiusTexels;
+     // 1) Blocker search (PCSS reference style):
+    // search width grows with light size and receiver distance from light.
+    float lightSizeUV = lightRadius / max(tan(lightFov * 0.5) * SHADOW_FAR_PLANE, 0.0001);
+    float searchRadiusUVScalar = lightSizeUV * max((zReceiver - SHADOW_NEAR_PLANE) / max(zReceiver, SHADOW_NEAR_PLANE), 0.0);
+    vec2 searchRadiusUV = vec2(max(searchRadiusUVScalar, texelSize.x));
     float blockerSum = 0.0;
     float blockerCount = 0.0;
     for (int i = 0; i < POISSON_COUNT; ++i) {
@@ -179,13 +193,14 @@ float sample_shadow(
             blockerCount += 1.0;
         }
     }
-    if (blockerCount < 0.5) return 1.0;
+   if (blockerCount < 0.5) return 1.0;
     float avgBlockerDepth = blockerSum / blockerCount;
+    float zBlocker = linearize_shadow_depth(avgBlockerDepth);
 
-    // 2) Penumbra size: grows with receiver-blocker separation and light radius.
-    float penumbra = max(receiverDepth - avgBlockerDepth, 0.0) / max(avgBlockerDepth, 0.001);
-    float filterRadiusTexels = clamp(penumbra * (4.0 + 60.0 * lightRadius), 1.0, 30.0);
-    vec2 filterRadiusUV = texelSize * filterRadiusTexels;
+    // 2) Penumbra size estimation from PCSS:
+    // wPenumbra = ((dReceiver - dBlocker) / dBlocker) * wLight
+    float penumbraUV = max((zReceiver - zBlocker) / max(zBlocker, 0.0001), 0.0) * lightSizeUV;
+    vec2 filterRadiusUV = vec2(clamp(penumbraUV, max(texelSize.x, texelSize.y), 40.0 * max(texelSize.x, texelSize.y)));
 
     // 3) Visibility estimate with variable-radius PCF.
     float lit = 0.0;
@@ -382,7 +397,7 @@ float shadow = 1.0;
 
 if (myShadowSlot >= 0) {
     mat4 light_clip_from_world = make_spot_light_matrix(lights[i]);
-    shadow = sample_shadow(worldPos, N, Ldyn, light_clip_from_world, myShadowSlot, lights[i].params.x);
+   shadow = sample_shadow(worldPos, N, Ldyn, light_clip_from_world, myShadowSlot, lights[i].params.x, lights[i].params.w);
 }
 
 directLights += shadow * (diffuseDyn + specularDyn) * radiance * NdotLdyn;
